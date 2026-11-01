@@ -193,11 +193,9 @@ namespace DsChat
 
             int lines = SystemInformation.MouseWheelScrollLines;
             int step = lines < 0 ? msgHost.ClientSize.Height : Ui.Px(18) * Math.Max(1, lines);
-            int notches = delta / 120;
-            if (notches == 0) notches = delta > 0 ? 1 : -1;
 
             int current = -msgHost.AutoScrollPosition.Y;
-            int target = current - notches * step;
+            int target = current - (int)Math.Round(delta / 120.0 * step);
             if (target < 0) target = 0;
             if (target > max) target = max;
 
