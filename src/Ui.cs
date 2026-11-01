@@ -30,4 +30,13 @@ namespace DsChat
             return (int)Math.Round(v * S);
         }
     }
+
+    /// <summary>双缓冲面板，减少聊天区滚动与输入框变高时的闪烁。</summary>
+    public class BufferedPanel : Panel
+    {
+        public BufferedPanel()
+        {
+            DoubleBuffered = true;
+        }
+    }
 }

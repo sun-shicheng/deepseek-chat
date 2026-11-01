@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace DsChat
@@ -8,9 +9,43 @@ namespace DsChat
     /// <summary>极简 Markdown 渲染：代码块、行内代码、加粗、列表符号。流式输出时反复重绘。</summary>
     public static class Markdown
     {
+        private const int WM_SETREDRAW = 0x000B;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private static void Redraw(Control c, bool on)
+        {
+            try
+            {
+                if (c.IsHandleCreated)
+                    SendMessage(c.Handle, WM_SETREDRAW, on ? (IntPtr)1 : IntPtr.Zero, IntPtr.Zero);
+            }
+            catch { }
+        }
+
         public static void Render(RichTextBox rtb, string text, Color fg, Color codeBg, Color codeFg, Font body, Font mono)
         {
             rtb.SuspendLayout();
+            bool redraw = rtb.IsHandleCreated;
+            if (redraw) Redraw(rtb, false);
+            try
+            {
+                RenderCore(rtb, text, fg, codeBg, codeFg, body, mono);
+            }
+            finally
+            {
+                rtb.ResumeLayout();
+                if (redraw)
+                {
+                    Redraw(rtb, true);
+                    rtb.Invalidate();
+                }
+            }
+        }
+
+        private static void RenderCore(RichTextBox rtb, string text, Color fg, Color codeBg, Color codeFg, Font body, Font mono)
+        {
             rtb.Clear();
             rtb.ForeColor = fg;
 
@@ -50,7 +85,6 @@ namespace DsChat
 
                 if (li < lines.Length - 1) rtb.AppendText("\n");
             }
-            rtb.ResumeLayout();
         }
 
         private static void AppendCode(RichTextBox rtb, string line, Font mono, Color bg, Color fg)
@@ -157,6 +191,8 @@ namespace DsChat
         private Font body;
         private Font mono;
         private string text = "";
+        private bool needsReflow = true;
+        private int lastReflowWidth = -1;
 
         public MessageView(ChatMsg msg, bool isUser, Theme theme)
         {
@@ -195,9 +231,11 @@ namespace DsChat
 
         public void SetText(string s)
         {
-            text = s == null ? "" : s;
+            s = s == null ? "" : s;
+            if (s == text) return;
+            text = s;
+            needsReflow = true;
             Render();
-            Reflow(Width);
         }
 
         public string GetText() { return text; }
@@ -205,6 +243,7 @@ namespace DsChat
         public void SetError()
         {
             IsError = true;
+            needsReflow = true;
             Render();
             Reflow(Width);
         }
@@ -213,6 +252,7 @@ namespace DsChat
         public void SetTool()
         {
             IsTool = true;
+            needsReflow = true;
             Render();
             Reflow(Width);
         }
@@ -234,6 +274,8 @@ namespace DsChat
         /// <summary>按可用宽度重排，返回占用的高度。</summary>
         public int Reflow(int maxWidth)
         {
+            if (!needsReflow && lastReflowWidth == maxWidth) return Height;
+
             int padL = IsUser ? Ui.Px(14) : Ui.Px(2);
             int padR = IsUser ? Ui.Px(14) : Ui.Px(2);
             int padT = IsUser ? Ui.Px(10) : Ui.Px(2);
@@ -253,13 +295,19 @@ namespace DsChat
                 inner = limit - padL - padR;
             }
 
-            rtb.SetBounds(padL, padT, Math.Max(Ui.Px(80), inner), Ui.Px(10));
-            int h = MeasureHeight(Math.Max(Ui.Px(80), inner));
-            rtb.Height = h;
+            int innerW = Math.Max(Ui.Px(80), inner);
+            if (rtb.Left != padL || rtb.Top != padT || rtb.Width != innerW)
+                rtb.SetBounds(padL, padT, innerW, rtb.Height);
+            int h = MeasureHeight(innerW);
+            if (rtb.Height != h) rtb.Height = h;
 
             int w = IsUser ? Math.Max(Ui.Px(80), inner) + padL + padR : limit;
-            Width = w;
-            Height = h + padT + padB;
+            if (Width != w) Width = w;
+            int total = h + padT + padB;
+            if (Height != total) Height = total;
+
+            lastReflowWidth = maxWidth;
+            needsReflow = false;
             return Height;
         }
 

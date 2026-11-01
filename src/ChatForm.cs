@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -126,7 +126,14 @@ namespace DsChat
         private bool streaming;
         private int streamingIndex = -1;
         private StringBuilder pending = new StringBuilder();
-        private bool dirty;
+        private readonly object pendingLock = new object();
+        /// <summary>已经“打字”显示出来的字符数（用于平滑流式输出）</summary>
+        private int revealed;
+        private bool networkDone;
+        private bool turnFinished;
+        private DateTime lastReveal = DateTime.UtcNow;
+        private double revealCarry;
+        private const double RevealCharsPerSecond = 140.0;
         private bool userStopped;
         private Timer tick;
         private bool layingOut;
@@ -140,6 +147,21 @@ namespace DsChat
 
         [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
         private static extern int SetWindowTheme(IntPtr hwnd, string app, string idlist);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private const int WM_SETREDRAW = 0x000B;
+
+        private void SetRedraw(bool on)
+        {
+            try
+            {
+                if (IsHandleCreated)
+                    SendMessage(Handle, WM_SETREDRAW, on ? (IntPtr)1 : IntPtr.Zero, IntPtr.Zero);
+            }
+            catch { }
+        }
 
         private void ApplyScrollbarTheme()
         {
@@ -162,8 +184,8 @@ namespace DsChat
             UpdateStatusIdle();
 
             tick = new Timer();
-            tick.Interval = 55;
-            tick.Tick += delegate { if (dirty) { dirty = false; if (streaming) FlushStream(); } };
+            tick.Interval = 35;
+            tick.Tick += delegate { StreamTick(); };
             tick.Start();
             Application.AddMessageFilter(this);
         }
@@ -226,11 +248,11 @@ namespace DsChat
             DoubleBuffered = true;
             KeyPreview = true;
 
-            sidebar = new Panel();
+            sidebar = new BufferedPanel();
             sidebar.SetBounds(0, 0, SidebarWidth, ClientSize.Height);
             Controls.Add(sidebar);
 
-            main = new Panel();
+            main = new BufferedPanel();
             main.SetBounds(SidebarWidth, 0, ClientSize.Width - SidebarWidth, ClientSize.Height);
             Controls.Add(main);
 
@@ -266,7 +288,7 @@ namespace DsChat
             histTitle.Location = new Point(22, 140);
             sidebar.Controls.Add(histTitle);
 
-            sessionList = new Panel();
+            sessionList = new BufferedPanel();
             sessionList.Location = new Point(10, 162);
             sessionList.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             sessionList.Size = new Size(SidebarWidth - 20, ClientSize.Height - 162 - 110);
@@ -298,7 +320,7 @@ namespace DsChat
             sidebar.Controls.Add(btnSettings);
 
             // ---- 主区 ----
-            header = new Panel();
+            header = new BufferedPanel();
             header.SetBounds(0, 0, main.ClientSize.Width, 56);
             main.Controls.Add(header);
 
@@ -327,7 +349,7 @@ namespace DsChat
             btnFiles.Click += delegate { OpenWorkspace(); };
             header.Controls.Add(btnFiles);
 
-            msgHost = new Panel();
+            msgHost = new BufferedPanel();
             msgHost.SetBounds(0, 56, main.ClientSize.Width, Math.Max(0, main.ClientSize.Height - 56 - 104));
             msgHost.AutoScroll = true;
             main.Controls.Add(msgHost);
@@ -338,11 +360,11 @@ namespace DsChat
                 atBottom = msgHost.VerticalScroll.Value >= msgHost.VerticalScroll.Maximum - Ui.Px(48);
             };
 
-            composerWrap = new Panel();
+            composerWrap = new BufferedPanel();
             composerWrap.SetBounds(0, Math.Max(56, main.ClientSize.Height - 104), main.ClientSize.Width, 104);
             main.Controls.Add(composerWrap);
 
-            composerBox = new Panel();
+            composerBox = new BufferedPanel();
             composerBox.SetBounds(26, 10, Math.Max(200, composerWrap.ClientSize.Width - 52), 64);
             composerWrap.Controls.Add(composerBox);
             composerBox.Paint += ComposerBox_Paint;
@@ -389,32 +411,37 @@ namespace DsChat
         private void LayoutAll()
         {
             if (sidebar == null || main == null) return;
-            int w = ClientSize.Width;
-            int h = ClientSize.Height;
-            int sideW = Ui.Px(SidebarWidth);
-            int headerH = Ui.Px(56);
+            SuspendLayout();
+            try
+            {
+                int w = ClientSize.Width;
+                int h = ClientSize.Height;
+                int sideW = Ui.Px(SidebarWidth);
+                int headerH = Ui.Px(56);
 
-            sidebar.SetBounds(0, 0, sideW, h);
-            main.SetBounds(sideW, 0, Math.Max(Ui.Px(200), w - sideW), h);
+                sidebar.SetBounds(0, 0, sideW, h);
+                main.SetBounds(sideW, 0, Math.Max(Ui.Px(200), w - sideW), h);
 
-            int mw = main.ClientSize.Width;
-            int mh = main.ClientSize.Height;
-            header.SetBounds(0, 0, mw, headerH);
+                int mw = main.ClientSize.Width;
+                int mh = main.ClientSize.Height;
+                header.SetBounds(0, 0, mw, headerH);
 
-            int boxW = Math.Max(Ui.Px(200), mw - Ui.Px(52));
-            int inputW = Math.Max(Ui.Px(80), boxW - btnSend.Width - Ui.Px(54));
-            composerBoxH = MeasureComposerHeight(inputW);
-            int composerH = composerBoxH + Ui.Px(40);
+                int boxW = Math.Max(Ui.Px(200), mw - Ui.Px(52));
+                int inputW = Math.Max(Ui.Px(80), boxW - btnSend.Width - Ui.Px(54));
+                composerBoxH = MeasureComposerHeight(inputW);
+                int composerH = composerBoxH + Ui.Px(40);
 
-            composerWrap.SetBounds(0, Math.Max(headerH, mh - composerH), mw, composerH);
-            msgHost.SetBounds(0, headerH, mw, Math.Max(0, mh - headerH - composerH));
+                composerWrap.SetBounds(0, Math.Max(headerH, mh - composerH), mw, composerH);
+                msgHost.SetBounds(0, headerH, mw, Math.Max(0, mh - headerH - composerH));
 
-            composerBox.Top = Ui.Px(10);
-            composerBox.Height = composerBoxH;
-            lblHint.Top = composerBox.Bottom + Ui.Px(4);
+                composerBox.Top = Ui.Px(10);
+                composerBox.Height = composerBoxH;
+                lblHint.Top = composerBox.Bottom + Ui.Px(4);
 
-            LayoutHeader();
-            LayoutComposer();
+                LayoutHeader();
+                LayoutComposer();
+            }
+            finally { ResumeLayout(true); }
         }
 
         /// <summary>根据输入内容（含自动换行）计算发送框高度，限制在 1～约 10 行之间。</summary>
@@ -443,7 +470,20 @@ namespace DsChat
             int mw = main.ClientSize.Width;
             int boxW = Math.Max(Ui.Px(200), mw - Ui.Px(52));
             int inputW = Math.Max(Ui.Px(80), boxW - btnSend.Width - Ui.Px(54));
-            if (MeasureComposerHeight(inputW) != composerBoxH) LayoutAll();
+            if (MeasureComposerHeight(inputW) == composerBoxH) return;
+
+            bool redraw = IsHandleCreated;
+            if (redraw) SetRedraw(false);
+            try { LayoutAll(); }
+            finally
+            {
+                if (redraw)
+                {
+                    SetRedraw(true);
+                    composerWrap.Invalidate(true);
+                    msgHost.Invalidate();
+                }
+            }
         }
 
         private void LayoutHeader()
@@ -702,12 +742,10 @@ namespace DsChat
             {
                 ClearWelcomeIfNeeded();
 
-                // AutoScroll 面板滚动后，子控件的 Location 会被系统加上滚动偏移。
-                // 直接按内容坐标重新布局会把偏移算两遍，出现大片空白/滚动条乱跳，
-                // 所以先回到顶部布局，再恢复原来的滚动位置。
+                // AutoScroll 面板滚动后，子控件 Location 是“可见区域坐标”。
+                // 布局时按内容坐标减去当前滚动量来摆放，避免先滚到顶部再滚回来产生闪烁。
                 bool wasAtBottom = atBottom;
-                int oldScroll = -msgHost.AutoScrollPosition.Y;
-                if (oldScroll != 0) msgHost.AutoScrollPosition = new Point(0, 0);
+                int oldScroll = Math.Max(0, -msgHost.AutoScrollPosition.Y);
 
                 int pad = Ui.Px(26);
                 int scrollW = msgHost.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0;
@@ -718,16 +756,21 @@ namespace DsChat
                 {
                     int h = v.Reflow(maxW);
                     int x = v.IsUser ? pad + Math.Max(0, maxW - v.Width) : pad;
-                    v.Location = new Point(x, y);
+                    Point loc = new Point(x, y - oldScroll);
+                    if (v.Location != loc) v.Location = loc;
                     y += h + Ui.Px(18);
                 }
-                msgHost.AutoScrollMinSize = new Size(0, y + Ui.Px(8));
+                Size scrollSize = new Size(0, y + Ui.Px(8));
+                if (msgHost.AutoScrollMinSize != scrollSize) msgHost.AutoScrollMinSize = scrollSize;
 
                 // 欢迎标语居中
                 foreach (Control c in msgHost.Controls)
                 {
                     if (c.Name == "welcome")
-                        c.Location = new Point(Ui.Px(60), Math.Max(Ui.Px(40), (msgHost.ClientSize.Height - c.Height) / 2 - Ui.Px(40)));
+                    {
+                        Point wl = new Point(Ui.Px(60), Math.Max(Ui.Px(40), (msgHost.ClientSize.Height - c.Height) / 2 - Ui.Px(40)));
+                        if (c.Location != wl) c.Location = wl;
+                    }
                 }
 
                 int max = Math.Max(0, msgHost.AutoScrollMinSize.Height - msgHost.ClientSize.Height);
@@ -749,7 +792,7 @@ namespace DsChat
             atBottom = true;
             if (msgHost == null || !msgHost.IsHandleCreated) return;
             int max = Math.Max(0, msgHost.AutoScrollMinSize.Height - msgHost.ClientSize.Height);
-            msgHost.AutoScrollPosition = new Point(0, max);
+            if (-msgHost.AutoScrollPosition.Y != max) msgHost.AutoScrollPosition = new Point(0, max);
         }
 
         // ================= 发送 =================
@@ -808,8 +851,12 @@ namespace DsChat
             ChatMsg botMsg = new ChatMsg("assistant", "");
             AddView(botMsg, false);
             streamingIndex = views.Count - 1;
-            pending.Length = 0;
-            dirty = false;
+            ClearPending();
+            revealed = 0;
+            revealCarry = 0;
+            networkDone = false;
+            turnFinished = false;
+            lastReveal = DateTime.UtcNow;
             streaming = true;
             atBottom = true;
             SetBusyUi(true);
@@ -821,14 +868,20 @@ namespace DsChat
 
             cli.OnDelta += delegate (string d)
             {
-                pending.Append(d);
-                dirty = true;
+                if (string.IsNullOrEmpty(d)) return;
+                lock (pendingLock) pending.Append(d);
             };
             cli.OnError += delegate (string err)
             {
                 SafeInvoke(delegate
                 {
+                    if (turnFinished) return;
+                    turnFinished = true;
                     streaming = false;
+                    networkDone = false;
+                    int total = PendingLength();
+                    if (revealed < total) revealed = total;
+                    FlushStream();
                     SetBusyUi(false);
                     string msg = err == null ? "未知错误" : err.Trim();
                     if (msg.Length > 600) msg = msg.Substring(0, 600) + "…";
@@ -844,14 +897,24 @@ namespace DsChat
             {
                 SafeInvoke(delegate
                 {
-                    streaming = false;
-                    dirty = false;
-                    if (!userStopped && cfg.EnableTools && cli.ToolCalls.Count > 0 && toolRounds < MaxToolRounds)
+                    if (turnFinished) return;
+                    networkDone = true;
+
+                    if (userStopped)
                     {
+                        revealed = PendingLength();
+                        FinishTurn();
+                        return;
+                    }
+                    if (cfg.EnableTools && cli.ToolCalls.Count > 0 && toolRounds < MaxToolRounds)
+                    {
+                        revealed = PendingLength();
+                        FlushStream();
                         RunTools(cli);
                         return;
                     }
-                    FinishTurn();
+                    if (revealed >= PendingLength()) FinishTurn();
+                    // 否则等打字机把剩余文字显示完，再由 StreamTick 调 FinishTurn
                 });
             };
 
@@ -870,10 +933,16 @@ namespace DsChat
 
         private void FinishTurn()
         {
+            if (turnFinished) return;
+            turnFinished = true;
+            streaming = false;
+            networkDone = false;
+
             Session s = sessions[active];
             SetBusyUi(false);
+            if (revealed < PendingLength()) revealed = PendingLength();
             FlushStream();
-            string content = pending.ToString();
+            string content = PendingText();
             if (content.Trim().Length == 0)
             {
                 if (userStopped)
@@ -893,7 +962,9 @@ namespace DsChat
             {
                 s.Messages.Add(new ChatMsg("assistant", content));
             }
-            pending.Length = 0;
+            ClearPending();
+            revealed = 0;
+            revealCarry = 0;
             turnExtra.Clear();
             LayoutMessages(true);
             ScrollToBottom();
@@ -906,11 +977,13 @@ namespace DsChat
         private void RunTools(ChatClient cli)
         {
             toolRounds++;
-            string partial = pending.ToString();
+            string partial = PendingText();
             List<ToolCall> calls = cli.ToolCalls;
 
             if (partial.Trim().Length == 0) RemoveStreamingView();
-            pending.Length = 0;
+            ClearPending();
+            revealed = 0;
+            revealCarry = 0;
 
             ChatMsg asst = new ChatMsg("assistant", partial);
             asst.ToolCalls = calls;
@@ -1030,14 +1103,72 @@ namespace DsChat
             streamingIndex = -1;
         }
 
+        private int PendingLength()
+        {
+            lock (pendingLock) return pending.Length;
+        }
+
+        private string PendingText()
+        {
+            lock (pendingLock) return pending.ToString();
+        }
+
+        private string PendingText(int len)
+        {
+            lock (pendingLock)
+            {
+                if (len > pending.Length) len = pending.Length;
+                if (len < 0) len = 0;
+                return pending.ToString(0, len);
+            }
+        }
+
+        private void ClearPending()
+        {
+            lock (pendingLock) pending.Length = 0;
+        }
+
+        /// <summary>流式输出的“打字机”：网络数据先缓冲，再按稳定速度逐字显示。</summary>
+        private void StreamTick()
+        {
+            if (!streaming) return;
+            int total = PendingLength();
+            if (revealed < total)
+            {
+                int backlog = total - revealed;
+                DateTime now = DateTime.UtcNow;
+                double dt = (now - lastReveal).TotalSeconds;
+                lastReveal = now;
+                if (dt <= 0) dt = 0.035;
+                if (dt > 0.12) dt = 0.12; // 网络停顿后不要一次吐一大段
+
+                revealCarry += RevealCharsPerSecond * dt;
+                int step = (int)revealCarry;
+                revealCarry -= step;
+
+                // 积压较多时适当追赶，避免网络结束后还要等太久
+                int catchup = backlog / 24;
+                if (catchup > step) step = catchup;
+                if (step < 1) step = 1;
+
+                revealed += step;
+                if (revealed > total) revealed = total;
+                FlushStream();
+            }
+            else
+            {
+                lastReveal = DateTime.UtcNow;
+            }
+
+            if (networkDone && revealed >= PendingLength()) FinishTurn();
+        }
+
         private void FlushStream()
         {
             if (streamingIndex < 0 || streamingIndex >= views.Count) return;
             MessageView v = views[streamingIndex];
-            v.SetText(pending.ToString());
-            bool nearBottom = atBottom;
-            LayoutMessages(nearBottom);
-            if (nearBottom) ScrollToBottom();
+            v.SetText(PendingText(revealed));
+            LayoutMessages(atBottom);
         }
 
         private void SetBusyUi(bool busy)

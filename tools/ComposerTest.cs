@@ -37,17 +37,20 @@ internal static class ComposerTest
         Control send = (Control)Field(f, "btnSend");
 
         int h0 = box.Height, i0 = input.Height, m0 = host.Height, w0 = wrap.Height;
-        Console.WriteLine("one line: box=" + h0 + " input=" + i0 + " host=" + m0 + " wrap=" + w0);
+        int hintY0 = hint.PointToScreen(Point.Empty).Y;
+        Console.WriteLine("one line: box=" + h0 + " input=" + i0 + " host=" + m0 + " wrap=" + w0 + " hintY=" + hintY0);
         if (h0 != Ui.Px(64)) throw new Exception("min height wrong");
 
         input.Text = "第一行\r\n第二行\r\n第三行";
         Pump(300);
         int h3 = box.Height, i3 = input.Height, m3 = host.Height;
-        Console.WriteLine("three lines: box=" + h3 + " input=" + i3 + " host=" + m3);
+        int hintY3 = hint.PointToScreen(Point.Empty).Y;
+        Console.WriteLine("three lines: box=" + h3 + " input=" + i3 + " host=" + m3 + " hintY=" + hintY3);
         if (h3 <= h0) throw new Exception("composer did not grow");
         if (i3 <= i0) throw new Exception("input did not grow");
         if (m3 >= m0) throw new Exception("message area did not shrink");
         if (hint.Top < box.Bottom) throw new Exception("hint overlaps composer");
+        if (Math.Abs(hintY3 - hintY0) > 1) throw new Exception("hint moved on screen: " + hintY0 + " -> " + hintY3);
         if (send.Bottom > box.Height) throw new Exception("send button outside composer");
         if (wrap.Height != h3 + Ui.Px(40)) throw new Exception("wrap height mismatch");
 
