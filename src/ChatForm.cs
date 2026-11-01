@@ -106,7 +106,7 @@ namespace DsChat
         }
     }
 
-    public class ChatForm : Form
+    public class ChatForm : Form, IMessageFilter
     {
         private Config cfg;
         private Theme th;
@@ -164,6 +164,45 @@ namespace DsChat
             tick.Interval = 55;
             tick.Tick += delegate { if (dirty) { dirty = false; if (streaming) FlushStream(); } };
             tick.Start();
+            Application.AddMessageFilter(this);
+        }
+
+        // ================= 鼠标滚轮 =================
+        // 消息正文是 RichTextBox，滚轮事件会被子控件吃掉，导致消息区无法用滚轮滑动。
+        // 这里在消息分发前截获 WM_MOUSEWHEEL：只要鼠标在消息区上方，就手动滚动 msgHost。
+        public bool PreFilterMessage(ref Message m)
+        {
+            const int WM_MOUSEWHEEL = 0x020A;
+            if (m.Msg != WM_MOUSEWHEEL) return false;
+            if (Form.ActiveForm != this) return false;
+            if (msgHost == null || !msgHost.IsHandleCreated) return false;
+
+            if (!msgHost.ClientRectangle.Contains(msgHost.PointToClient(Cursor.Position))) return false;
+
+            long wp = m.WParam.ToInt64();
+            short delta = (short)((wp >> 16) & 0xFFFF);
+            if (delta == 0) return false;
+            ScrollMessagesByWheel(delta);
+            return true;
+        }
+
+        private void ScrollMessagesByWheel(int delta)
+        {
+            int max = Math.Max(0, msgHost.AutoScrollMinSize.Height - msgHost.ClientSize.Height);
+            if (max <= 0) return;
+
+            int lines = SystemInformation.MouseWheelScrollLines;
+            int step = lines < 0 ? msgHost.ClientSize.Height : Ui.Px(18) * Math.Max(1, lines);
+            int notches = delta / 120;
+            if (notches == 0) notches = delta > 0 ? 1 : -1;
+
+            int current = -msgHost.AutoScrollPosition.Y;
+            int target = current - notches * step;
+            if (target < 0) target = 0;
+            if (target > max) target = max;
+
+            msgHost.AutoScrollPosition = new Point(0, target);
+            atBottom = target >= max - Ui.Px(48);
         }
 
         protected override void OnShown(EventArgs e)
@@ -1056,6 +1095,12 @@ namespace DsChat
             }
             catch { }
             base.OnFormClosing(e);
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            try { Application.RemoveMessageFilter(this); } catch { }
+            base.OnFormClosed(e);
         }
     }
 
