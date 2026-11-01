@@ -103,7 +103,8 @@ namespace DsChat
             r.KeepAlive = false;
             r.Timeout = Math.Max(10, cfg.TimeoutSeconds) * 1000;
             r.ReadWriteTimeout = Math.Max(10, cfg.TimeoutSeconds) * 1000;
-            r.Proxy = BuildProxy();
+            IWebProxy proxy = BuildProxy();
+            if (proxy != null) r.Proxy = proxy;   // null = 保持系统默认（使用 IE/系统代理）
             try { ServicePointManager.Expect100Continue = false; } catch { }
             if (cfg.IgnoreCert)
                 ServicePointManager.ServerCertificateValidationCallback = delegate { return true; };
@@ -168,7 +169,8 @@ namespace DsChat
         {
             if (string.IsNullOrEmpty(cfg.Proxy))
             {
-                // TrustEnv=false 时强制直连，忽略 IE/系统代理与环境变量代理（等价 trust_env=False）
+                // TrustEnv=false 时强制直连，忽略 IE/系统代理与环境变量代理（等价 trust_env=False）；
+                // TrustEnv=true 返回 null，交给 HttpWebRequest 使用系统默认代理。
                 return cfg.TrustEnv ? null : (IWebProxy)new DirectProxy();
             }
             string hp = cfg.Proxy.Trim();
