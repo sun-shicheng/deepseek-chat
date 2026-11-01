@@ -24,6 +24,8 @@ namespace DsChat
         public string ToolCallId;
         /// <summary>role=assistant 且模型要求调用工具时，这里非空</summary>
         public List<ToolCall> ToolCalls;
+        /// <summary>DeepSeek 思考模型的 reasoning_content；工具调用回放时需要带回去</summary>
+        public string ReasoningContent;
 
         public ChatMsg(string role, string content) { Role = role; Content = content; }
     }
@@ -49,6 +51,9 @@ namespace DsChat
 
         /// <summary>本轮模型要求调用的工具（流式/非流式都会累积到这里）</summary>
         public List<ToolCall> ToolCalls = new List<ToolCall>();
+        /// <summary>本轮模型返回的 reasoning_content（如果有）</summary>
+        public StringBuilder Reasoning = new StringBuilder();
+        public string ReasoningContent { get { return Reasoning.ToString(); } }
 
         public ChatClient(Config c) { cfg = c.Clone(); }
 
@@ -62,6 +67,7 @@ namespace DsChat
         {
             cancelled = false;
             ToolCalls.Clear();
+            Reasoning.Length = 0;
             Thread t = new Thread(delegate ()
             {
                 try { Run(messages); }
@@ -126,6 +132,7 @@ namespace DsChat
                 if (!sse)
                 {
                     string all = sr.ReadToEnd();
+                    ExtractFullReasoning(all, Reasoning);
                     string text = ExtractFull(all);
                     ExtractFullToolCalls(all, ToolCalls);
                     if (text == null) text = ExtractDelta(all);
@@ -149,6 +156,8 @@ namespace DsChat
                     if (payload.Length == 0) continue;
                     if (payload == "[DONE]") break;
                     ExtractDeltaToolCalls(payload, ToolCalls);
+                    string think = ExtractDeltaReasoning(payload);
+                    if (!string.IsNullOrEmpty(think)) Reasoning.Append(think);
                     string piece = ExtractDelta(payload);
                     if (piece != null && piece.Length > 0) FireDelta(piece);
                 }
@@ -191,8 +200,71 @@ namespace DsChat
             return wp;
         }
 
+        /// <summary>
+        /// 防御性清理：确保每个 tool 消息都紧跟在发起它的 assistant.tool_calls 后面，
+        /// 缺失的工具结果补占位，避免 DeepSeek 报 “role 'tool' must be ... tool_calls”。
+        /// </summary>
+        private static List<ChatMsg> SanitizeMessages(List<ChatMsg> msgs)
+        {
+            List<ChatMsg> list = new List<ChatMsg>();
+            foreach (ChatMsg m in msgs)
+            {
+                if (m == null) continue;
+                if (m.Role == "tool")
+                {
+                    int j = list.Count - 1;
+                    while (j >= 0 && list[j].Role == "tool") j--;
+                    if (j < 0) continue;
+                    ChatMsg a = list[j];
+                    if (a.Role != "assistant" || a.ToolCalls == null) continue;
+
+                    bool match = false;
+                    foreach (ToolCall tc in a.ToolCalls)
+                        if (tc != null && tc.Id == m.ToolCallId) { match = true; break; }
+                    if (!match) continue;
+
+                    bool dup = false;
+                    for (int k = j + 1; k < list.Count; k++)
+                        if (list[k].Role == "tool" && list[k].ToolCallId == m.ToolCallId) { dup = true; break; }
+                    if (dup) continue;
+
+                    list.Add(m);
+                }
+                else
+                {
+                    list.Add(m);
+                }
+            }
+
+            List<ChatMsg> result = new List<ChatMsg>();
+            for (int i = 0; i < list.Count; i++)
+            {
+                ChatMsg m = list[i];
+                result.Add(m);
+                if (m.Role != "assistant" || m.ToolCalls == null || m.ToolCalls.Count == 0) continue;
+
+                int end = i + 1;
+                while (end < list.Count && list[end].Role == "tool") end++;
+
+                foreach (ToolCall tc in m.ToolCalls) {
+                    if (tc == null) continue;
+                    bool found = false;
+                    for (int k = i + 1; k < end; k++)
+                        if (list[k].ToolCallId == tc.Id) { found = true; break; }
+                    if (!found)
+                    {
+                        ChatMsg missing = new ChatMsg("tool", "（工具未执行）");
+                        missing.ToolCallId = tc.Id == null ? "" : tc.Id;
+                        result.Add(missing);
+                    }
+                }
+            }
+            return result;
+        }
+
         private string BuildBody(List<ChatMsg> msgs, bool stream)
         {
+            msgs = SanitizeMessages(msgs);
             StringBuilder sb = new StringBuilder();
             sb.Append("{\"model\":\"").Append(Json.Escape(cfg.Model)).Append("\",\"messages\":[");
             bool first = true;
@@ -232,8 +304,10 @@ namespace DsChat
 
             StringBuilder sb = new StringBuilder();
             sb.Append("{\"role\":\"").Append(Json.Escape(m.Role)).Append("\",\"content\":");
-            if (m.Content == null || m.Content.Length == 0) sb.Append("null");
+            if (m.Content == null || m.Content.Length == 0) sb.Append("\"\"");
             else sb.Append('"').Append(Json.Escape(m.Content)).Append('"');
+            if (m.Role == "assistant" && !string.IsNullOrEmpty(m.ReasoningContent))
+                sb.Append(",\"reasoning_content\":\"").Append(Json.Escape(m.ReasoningContent)).Append('"');
             if (hasCalls)
             {
                 sb.Append(",\"tool_calls\":[");
@@ -348,6 +422,33 @@ namespace DsChat
             catch { return null; }
         }
 
+        private static string ExtractDeltaReasoning(string json)
+        {
+            Dictionary<string, object> c0 = FirstChoice(json);
+            if (c0 == null) return null;
+            object deltaObj;
+            if (!c0.TryGetValue("delta", out deltaObj)) return null;
+            Dictionary<string, object> d = deltaObj as Dictionary<string, object>;
+            if (d == null) return null;
+            object v;
+            if (d.TryGetValue("reasoning_content", out v) && v is string) return (string)v;
+            if (d.TryGetValue("reasoning", out v) && v is string) return (string)v;
+            return null;
+        }
+
+        private static void ExtractFullReasoning(string json, StringBuilder sb)
+        {
+            Dictionary<string, object> c0 = FirstChoice(json);
+            if (c0 == null) return;
+            object msgObj;
+            if (!c0.TryGetValue("message", out msgObj)) return;
+            Dictionary<string, object> m = msgObj as Dictionary<string, object>;
+            if (m == null) return;
+            object v;
+            if (m.TryGetValue("reasoning_content", out v) && v is string) sb.Append((string)v);
+            else if (m.TryGetValue("reasoning", out v) && v is string) sb.Append((string)v);
+        }
+
         private static void ExtractDeltaToolCalls(string json, List<ToolCall> acc)
         {
             Dictionary<string, object> c0 = FirstChoice(json);
@@ -387,11 +488,11 @@ namespace DsChat
                 int index;
                 if (streamed)
                 {
-                    index = acc.Count;
+                    index = acc.Count <= 1 ? 0 : acc.Count;
                     object idxObj;
                     if (d.TryGetValue("index", out idxObj) && idxObj != null)
                     {
-                        try { index = Convert.ToInt32(idxObj); } catch { index = acc.Count; }
+                        try { index = Convert.ToInt32(idxObj); } catch { index = acc.Count <= 1 ? 0 : acc.Count; }
                     }
                     if (index < 0) index = 0;
                     while (acc.Count <= index) acc.Add(new ToolCall());
@@ -412,7 +513,12 @@ namespace DsChat
                     if (fn != null)
                     {
                         object nObj;
-                        if (fn.TryGetValue("name", out nObj) && nObj is string) tc.Name = (string)nObj;
+                        if (fn.TryGetValue("name", out nObj) && nObj is string)
+                        {
+                            // 部分网关会在后续分片里补发空字符串，不能覆盖第一片的真实函数名
+                            string nm = ((string)nObj).Trim();
+                            if (nm.Length > 0) tc.Name = nm;
+                        }
                         object aObj;
                         if (fn.TryGetValue("arguments", out aObj) && aObj is string)
                         {
@@ -425,9 +531,32 @@ namespace DsChat
             }
         }
 
+        /// <summary>清理无效/重复的工具调用，保证 assistant.tool_calls 与 tool 结果能一一对应。</summary>
+        private void NormalizeToolCalls()
+        {
+            if (ToolCalls.Count == 0) return;
+            HashSet<string> seen = new HashSet<string>();
+            for (int i = ToolCalls.Count - 1; i >= 0; i--)
+            {
+                ToolCall tc = ToolCalls[i];
+                if (tc == null) { ToolCalls.RemoveAt(i); continue; }
+                string name = tc.Name == null ? "" : tc.Name.Trim();
+                if (name.Length == 0) { ToolCalls.RemoveAt(i); continue; }
+                tc.Name = name;
+
+                if (tc.Id == null || tc.Id.Length == 0) tc.Id = "call_" + i;
+                string baseId = tc.Id;
+                string id = baseId;
+                int n = 1;
+                while (seen.Contains(id)) { id = baseId + "_" + n; n++; }
+                tc.Id = id;
+                seen.Add(id);
+            }
+        }
+
         private void FireDelta(string s) { if (OnDelta != null) OnDelta(s); }
         private void FireError(string s) { if (OnError != null) OnError(s); }
-        private void FireDone() { if (OnDone != null) OnDone(); }
+        private void FireDone() { NormalizeToolCalls(); if (OnDone != null) OnDone(); }
     }
 
     public static class Json

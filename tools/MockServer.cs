@@ -71,6 +71,13 @@ internal static class MockServer
                     {
                         if (body.Contains("tooltest:evil"))
                             EmitToolCall(ns, "write_file", "{\"path\":\"../evil.txt\",\"content\":\"should be rejected\"}");
+                        else if (body.Contains("tooltest:empty"))
+                            EmitToolCallEmptyName(ns, "list_files", "{\"subdir\":\"\"}");
+                        else if (body.Contains("tooltest:think"))
+                        {
+                            Write(ns, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"内部思考：先看看工作区。\"}}]}\n\n");
+                            EmitToolCall(ns, "list_files", "{\"subdir\":\"\"}");
+                        }
                         else if (body.Contains("tooltest:write"))
                             EmitToolCall(ns, "write_file", "{\"path\":\"ai_test.txt\",\"content\":\"hello from mock server\\n第二行中文\"}");
                         else if (body.Contains("tooltest:read"))
@@ -120,6 +127,15 @@ internal static class MockServer
         Write(ns, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_mock_1\",\"type\":\"function\",\"function\":{\"name\":\"" + name + "\",\"arguments\":\"\"}}]}}]}\n\n");
         foreach (string piece in Split(argsJson, 7))
             Write(ns, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"" + Escape(piece) + "\"}}]}}]}\n\n");
+        Write(ns, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n");
+    }
+
+    /// <summary>模拟某些网关：后续分片补 id:"" / name:""，真实值只在第一片。</summary>
+    private static void EmitToolCallEmptyName(NetworkStream ns, string name, string argsJson)
+    {
+        Write(ns, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_mock_empty\",\"type\":\"function\",\"function\":{\"name\":\"" + name + "\",\"arguments\":\"\"}}]}}]}\n\n");
+        foreach (string piece in Split(argsJson, 5))
+            Write(ns, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\",\"type\":\"function\",\"function\":{\"name\":\"\",\"arguments\":\"" + Escape(piece) + "\"}}]}}]}\n\n");
         Write(ns, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n");
     }
 

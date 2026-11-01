@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using DsChat;
@@ -74,7 +75,57 @@ internal static class ToolTest
 
         // 6. 模拟 AI 试图越界
         ExpectFail(root, "../evil.txt");
+
+        // 7. 网关在后续分片里补发空 id/name，不能覆盖真实函数名
+        List<ChatMsg> emptyMsgs = new List<ChatMsg>();
+        emptyMsgs.Add(new ChatMsg("user", "tooltest:empty"));
+        Run(cfg, emptyMsgs, out calls, out text);
+        Console.WriteLine("empty-name delta -> calls=" + calls.Count + " name=" + (calls.Count > 0 ? calls[0].Name : ""));
+        if (calls.Count != 1 || calls[0].Name != "list_files") throw new Exception("empty continuation name broke tool call");
+        if (ArgOf(calls[0].Arguments, "subdir") != "") throw new Exception("empty continuation args wrong");
+
+        // 8. reasoning_content 需要被收集，工具回放时带回去
+        List<ChatMsg> thinkMsgs = new List<ChatMsg>();
+        thinkMsgs.Add(new ChatMsg("user", "tooltest:think"));
+        Run(cfg, thinkMsgs, out calls, out text);
+        Console.WriteLine("reasoning=[" + lastReasoning + "] calls=" + calls.Count);
+        if (lastReasoning.IndexOf("内部思考") < 0) throw new Exception("reasoning_content not collected");
+        if (calls.Count != 1 || calls[0].Name != "list_files") throw new Exception("think tool call parse failed");
+
+        // 9. 防御性清理：孤儿 tool 消息必须被丢弃，合法 tool_calls 对必须保留
+        ChatClient cli = new ChatClient(cfg);
+        List<ChatMsg> orphan = new List<ChatMsg>();
+        ChatMsg bad = new ChatMsg("tool", "orphan");
+        bad.ToolCallId = "nope";
+        orphan.Add(bad);
+        orphan.Add(new ChatMsg("user", "hi"));
+        string body = BuildBody(cli, orphan);
+        if (body.IndexOf("\"role\":\"tool\"") >= 0) throw new Exception("orphan tool not removed");
+        Console.WriteLine("orphan tool removed: OK");
+
+        List<ChatMsg> pair = new List<ChatMsg>();
+        ChatMsg asst2 = new ChatMsg("assistant", null);
+        asst2.ToolCalls = new List<ToolCall>();
+        asst2.ToolCalls.Add(new ToolCall { Id = "call_x", Name = "list_files", Arguments = "{}" });
+        asst2.ReasoningContent = "内部思考：先看看目录";
+        pair.Add(new ChatMsg("user", "hi"));
+        pair.Add(asst2);
+        ChatMsg tool2 = new ChatMsg("tool", "ok");
+        tool2.ToolCallId = "call_x";
+        pair.Add(tool2);
+        body = BuildBody(cli, pair);
+        if (body.IndexOf("\"role\":\"tool\"") < 0 || body.IndexOf("reasoning_content") < 0) throw new Exception("valid pair/reasoning dropped");
+        Console.WriteLine("valid pair kept: OK");
+
         Console.WriteLine("ALL OK");
+    }
+
+    private static string lastReasoning;
+
+    private static string BuildBody(ChatClient cli, List<ChatMsg> msgs)
+    {
+        MethodInfo mi = typeof(ChatClient).GetMethod("BuildBody", BindingFlags.NonPublic | BindingFlags.Instance);
+        return (string)mi.Invoke(cli, new object[] { msgs, false });
     }
 
     private static void ExpectFail(string root, string rel)
@@ -105,6 +156,7 @@ internal static class ToolTest
         if (!done.WaitOne(20000)) throw new Exception("timeout");
         if (err != null) throw new Exception("api error: " + err);
         calls = cli.ToolCalls;
+        lastReasoning = cli.ReasoningContent;
         text = got.ToString();
     }
 

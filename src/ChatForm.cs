@@ -966,6 +966,7 @@ namespace DsChat
 
             ChatMsg asst = new ChatMsg("assistant", partial);
             asst.ToolCalls = calls;
+            asst.ReasoningContent = cli.ReasoningContent;
             turnExtra.Add(asst);
 
             foreach (ToolCall tc in calls)
