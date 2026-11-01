@@ -57,6 +57,24 @@ internal static class MockServer
                 {
                     Write(ns, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n");
 
+                    // 工具轮数上限测试：只要请求里还有 tools 就一直要求调用工具
+                    if (body.Contains("loopforever"))
+                    {
+                        if (body.Contains("\"tools\":["))
+                        {
+                            EmitToolCall(ns, "list_files", "{\"subdir\":\"\"}");
+                        }
+                        else
+                        {
+                            string done = "工具调用次数已达上限，这是最后的文字总结：本轮操作已完成。";
+                            foreach (string piece in Split(done, 4))
+                                Write(ns, "data: {\"choices\":[{\"delta\":{\"content\":\"" + Escape(piece) + "\"}}]}\n\n");
+                        }
+                        Write(ns, "data: [DONE]\n\n");
+                        ns.Flush();
+                        return;
+                    }
+
                     // 工具调用联调分支：用户消息里带 tooltest 时返回 tool_calls
                     if (body.Contains("\"role\":\"tool\""))
                     {

@@ -141,7 +141,9 @@ namespace DsChat
         /// <summary>本轮对话里临时的 tool_calls / tool 结果消息（不写进会话文件）</summary>
         private List<ChatMsg> turnExtra = new List<ChatMsg>();
         private int toolRounds;
-        private const int MaxToolRounds = 6;
+        private const int MaxToolRounds = 12;
+        private bool toolsAllowed = true;
+        private bool summarizing;
 
         private const int SidebarWidth = 252;
 
@@ -820,13 +822,15 @@ namespace DsChat
 
             turnExtra.Clear();
             toolRounds = 0;
+            summarizing = false;
             userStopped = false;
-            StartRequest();
+            StartRequest(true);
         }
 
         /// <summary>发起一轮请求（首轮和工具回填后都走这里）。</summary>
-        private void StartRequest()
+        private void StartRequest(bool allowTools)
         {
+            toolsAllowed = allowTools;
             ChatMsg botMsg = new ChatMsg("assistant", "");
             AddView(botMsg, false);
             streamingIndex = views.Count - 1;
@@ -842,7 +846,13 @@ namespace DsChat
             LayoutMessages(true);
             ScrollToBottom();
 
-            ChatClient cli = new ChatClient(cfg);
+            Config reqCfg = cfg;
+            if (!allowTools)
+            {
+                reqCfg = cfg.Clone();
+                reqCfg.EnableTools = false;
+            }
+            ChatClient cli = new ChatClient(reqCfg);
             client = cli;
 
             cli.OnDelta += delegate (string d)
@@ -885,11 +895,12 @@ namespace DsChat
                         FinishTurn();
                         return;
                     }
-                    if (cfg.EnableTools && cli.ToolCalls.Count > 0 && toolRounds < MaxToolRounds)
+                    if (toolsAllowed && cfg.EnableTools && cli.ToolCalls.Count > 0)
                     {
                         revealed = PendingLength();
                         FlushStream();
-                        RunTools(cli);
+                        if (toolRounds < MaxToolRounds) RunTools(cli);
+                        else StartFinalSummary();
                         return;
                     }
                     if (revealed >= PendingLength()) FinishTurn();
@@ -930,9 +941,13 @@ namespace DsChat
                 }
                 else
                 {
-                    string hint = toolRounds > 0
-                        ? "（本轮进行了 " + toolRounds + " 轮工具调用，但模型没有返回文字结果；可以再发一句「继续」，或检查工作区设置）"
-                        : "（没有收到内容，请检查接口路径、模型名称或代理设置）";
+                    string hint;
+                    if (summarizing)
+                        hint = "（工具调用已达上限，模型仍未返回文字总结；可以缩小任务范围，或者分多次让我处理）";
+                    else if (toolRounds > 0)
+                        hint = "（本轮进行了 " + toolRounds + " 轮工具调用，模型没有返回文字结果；已停止工具循环，建议缩小任务范围后重试）";
+                    else
+                        hint = "（没有收到内容，请检查接口路径、模型名称或代理设置）";
                     MessageView ev = AddView(new ChatMsg("assistant", hint), false);
                     ev.SetError();
                 }
@@ -956,6 +971,7 @@ namespace DsChat
         private void RunTools(ChatClient cli)
         {
             toolRounds++;
+            SetStatus("● 工具调用 " + toolRounds + "/" + MaxToolRounds + "…", false);
             string partial = PendingText();
             List<ToolCall> calls = cli.ToolCalls;
 
@@ -983,7 +999,28 @@ namespace DsChat
             LayoutMessages(true);
             ScrollToBottom();
             if (userStopped) { FinishTurn(); return; }
-            StartRequest();
+            StartRequest(true);
+        }
+
+        /// <summary>达到工具轮数上限后，关闭工具再请求一次文字总结，避免直接空手结束。</summary>
+        private void StartFinalSummary()
+        {
+            if (summarizing) { FinishTurn(); return; }
+            summarizing = true;
+
+            string partial = PendingText();
+            if (partial.Trim().Length == 0) RemoveStreamingView();
+            ClearPending();
+            revealed = 0;
+            revealCarry = 0;
+            if (partial.Trim().Length > 0)
+                turnExtra.Add(new ChatMsg("assistant", partial));
+
+            turnExtra.Add(new ChatMsg("user",
+                "工具调用次数已经达到 " + MaxToolRounds + " 轮上限。请停止调用工具，直接根据上面已经完成的工具结果，用中文总结：已经完成了什么、写入或修改了哪些文件、还有哪些没有完成。不要再请求调用工具。"));
+
+            StartRequest(false);
+            SetStatus("● 工具调用已达上限，正在生成总结…", false);
         }
 
         private string ExecuteTool(ToolCall tc, out string summary)

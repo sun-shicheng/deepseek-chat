@@ -36,7 +36,10 @@ namespace DsChat
         {
             get
             {
-                string d = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DeepSeekDesktop");
+                string custom = Environment.GetEnvironmentVariable("DSCHAT_HOME");
+                string d = string.IsNullOrEmpty(custom)
+                    ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DeepSeekDesktop")
+                    : custom;
                 if (!Directory.Exists(d)) Directory.CreateDirectory(d);
                 return d;
             }
