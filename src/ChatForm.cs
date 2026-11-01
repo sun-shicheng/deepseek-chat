@@ -208,6 +208,8 @@ namespace DsChat
             base.OnShown(e);
             try { input.Focus(); } catch { }
             ApplyScrollbarTheme();
+            LayoutMessages(false);
+            ScrollToBottom();
         }
 
         // ================= 界面构建 =================
@@ -331,6 +333,7 @@ namespace DsChat
             msgHost.Resize += delegate { if (!layingOut) LayoutMessages(true); };
             msgHost.Scroll += delegate
             {
+                if (layingOut) return;
                 atBottom = msgHost.VerticalScroll.Value >= msgHost.VerticalScroll.Maximum - Ui.Px(48);
             };
 
@@ -657,6 +660,14 @@ namespace DsChat
             try
             {
                 ClearWelcomeIfNeeded();
+
+                // AutoScroll 面板滚动后，子控件的 Location 会被系统加上滚动偏移。
+                // 直接按内容坐标重新布局会把偏移算两遍，出现大片空白/滚动条乱跳，
+                // 所以先回到顶部布局，再恢复原来的滚动位置。
+                bool wasAtBottom = atBottom;
+                int oldScroll = -msgHost.AutoScrollPosition.Y;
+                if (oldScroll != 0) msgHost.AutoScrollPosition = new Point(0, 0);
+
                 int pad = Ui.Px(26);
                 int scrollW = msgHost.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0;
                 int maxW = Math.Max(Ui.Px(240), msgHost.ClientSize.Width - pad * 2 - scrollW);
@@ -677,7 +688,12 @@ namespace DsChat
                     if (c.Name == "welcome")
                         c.Location = new Point(Ui.Px(60), Math.Max(Ui.Px(40), (msgHost.ClientSize.Height - c.Height) / 2 - Ui.Px(40)));
                 }
-                if (keepScroll && atBottom) ScrollToBottomDeferred();
+
+                int max = Math.Max(0, msgHost.AutoScrollMinSize.Height - msgHost.ClientSize.Height);
+                int target = (keepScroll && wasAtBottom) ? max : Math.Min(oldScroll, max);
+                if (target < 0) target = 0;
+                if (-msgHost.AutoScrollPosition.Y != target) msgHost.AutoScrollPosition = new Point(0, target);
+                atBottom = max <= 0 || target >= max - Ui.Px(48);
             }
             finally { layingOut = false; }
         }
@@ -687,20 +703,12 @@ namespace DsChat
             if (views.Count > 0) ClearWelcome();
         }
 
-        private void ScrollToBottomDeferred()
-        {
-            if (!IsHandleCreated) return;
-            BeginInvoke((MethodInvoker)delegate
-            {
-                try { if (views.Count > 0) msgHost.ScrollControlIntoView(views[views.Count - 1]); }
-                catch { }
-            });
-        }
-
         private void ScrollToBottom()
         {
             atBottom = true;
-            ScrollToBottomDeferred();
+            if (msgHost == null || !msgHost.IsHandleCreated) return;
+            int max = Math.Max(0, msgHost.AutoScrollMinSize.Height - msgHost.ClientSize.Height);
+            msgHost.AutoScrollPosition = new Point(0, max);
         }
 
         // ================= 发送 =================
