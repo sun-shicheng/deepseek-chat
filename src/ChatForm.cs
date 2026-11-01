@@ -116,6 +116,7 @@ namespace DsChat
         private Panel sidebar, header, msgHost, composerBox;
         private Panel sessionList;
         private Panel main, composerWrap;
+        private int composerBoxH = Ui.Px(64);
         private TextBox input;
         private PillButton btnSend, btnNew, btnTheme, btnSettings, btnFiles;
         private Label lblModel, lblStatus, lblHint;
@@ -355,6 +356,7 @@ namespace DsChat
             input.ForeColor = th.Text;
             input.ScrollBars = ScrollBars.None;
             input.KeyDown += Input_KeyDown;
+            input.TextChanged += delegate { RecalcComposerHeight(); };
             composerBox.Controls.Add(input);
 
             btnSend = new PillButton();
@@ -391,7 +393,6 @@ namespace DsChat
             int h = ClientSize.Height;
             int sideW = Ui.Px(SidebarWidth);
             int headerH = Ui.Px(56);
-            int composerH = Ui.Px(104);
 
             sidebar.SetBounds(0, 0, sideW, h);
             main.SetBounds(sideW, 0, Math.Max(Ui.Px(200), w - sideW), h);
@@ -399,11 +400,50 @@ namespace DsChat
             int mw = main.ClientSize.Width;
             int mh = main.ClientSize.Height;
             header.SetBounds(0, 0, mw, headerH);
+
+            int boxW = Math.Max(Ui.Px(200), mw - Ui.Px(52));
+            int inputW = Math.Max(Ui.Px(80), boxW - btnSend.Width - Ui.Px(54));
+            composerBoxH = MeasureComposerHeight(inputW);
+            int composerH = composerBoxH + Ui.Px(40);
+
             composerWrap.SetBounds(0, Math.Max(headerH, mh - composerH), mw, composerH);
             msgHost.SetBounds(0, headerH, mw, Math.Max(0, mh - headerH - composerH));
 
+            composerBox.Top = Ui.Px(10);
+            composerBox.Height = composerBoxH;
+            lblHint.Top = composerBox.Bottom + Ui.Px(4);
+
             LayoutHeader();
             LayoutComposer();
+        }
+
+        /// <summary>根据输入内容（含自动换行）计算发送框高度，限制在 1～约 10 行之间。</summary>
+        private int MeasureComposerHeight(int inputWidth)
+        {
+            int min = Ui.Px(64);
+            int max = Ui.Px(180);
+            if (input == null) return min;
+
+            string t = input.Text == null ? "" : input.Text;
+            if (t.Length == 0) return min;
+            if (t.EndsWith("\n") || t.EndsWith("\r")) t += " ";
+
+            Size sz = TextRenderer.MeasureText(t, input.Font,
+                new Size(Math.Max(Ui.Px(40), inputWidth - Ui.Px(6)), int.MaxValue),
+                TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
+            int h = sz.Height + Ui.Px(28);
+            if (h < min) h = min;
+            if (h > max) h = max;
+            return h;
+        }
+
+        private void RecalcComposerHeight()
+        {
+            if (composerBox == null || main == null || btnSend == null) return;
+            int mw = main.ClientSize.Width;
+            int boxW = Math.Max(Ui.Px(200), mw - Ui.Px(52));
+            int inputW = Math.Max(Ui.Px(80), boxW - btnSend.Width - Ui.Px(54));
+            if (MeasureComposerHeight(inputW) != composerBoxH) LayoutAll();
         }
 
         private void LayoutHeader()
@@ -421,8 +461,9 @@ namespace DsChat
         {
             if (composerBox == null || composerWrap == null) return;
             composerBox.Width = Math.Max(Ui.Px(200), composerWrap.ClientSize.Width - Ui.Px(52));
-            btnSend.Location = new Point(composerBox.Width - btnSend.Width - Ui.Px(12), (composerBox.Height - btnSend.Height) / 2);
-            input.SetBounds(Ui.Px(18), Ui.Px(14), Math.Max(Ui.Px(80), composerBox.Width - btnSend.Width - Ui.Px(54)), composerBox.Height - Ui.Px(28));
+            composerBox.Height = composerBoxH;
+            btnSend.Location = new Point(composerBox.Width - btnSend.Width - Ui.Px(12), composerBox.Height - btnSend.Height - Ui.Px(12));
+            input.SetBounds(Ui.Px(18), Ui.Px(14), Math.Max(Ui.Px(80), composerBox.Width - btnSend.Width - Ui.Px(54)), Math.Max(Ui.Px(20), composerBox.Height - Ui.Px(28)));
             using (GraphicsPath p = Round.Path(new Rectangle(0, 0, composerBox.Width - 1, composerBox.Height - 1), Ui.Px(16)))
                 composerBox.Region = new Region(p);
         }
