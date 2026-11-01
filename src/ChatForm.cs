@@ -117,7 +117,7 @@ namespace DsChat
         private Panel sessionList;
         private Panel main, composerWrap;
         private TextBox input;
-        private PillButton btnSend, btnNew, btnTheme, btnSettings;
+        private PillButton btnSend, btnNew, btnTheme, btnSettings, btnFiles;
         private Label lblModel, lblStatus, lblHint;
         private List<MessageView> views = new List<MessageView>();
 
@@ -130,6 +130,10 @@ namespace DsChat
         private Timer tick;
         private bool layingOut;
         private bool atBottom = true;
+        /// <summary>本轮对话里临时的 tool_calls / tool 结果消息（不写进会话文件）</summary>
+        private List<ChatMsg> turnExtra = new List<ChatMsg>();
+        private int toolRounds;
+        private const int MaxToolRounds = 6;
 
         private const int SidebarWidth = 252;
 
@@ -273,6 +277,16 @@ namespace DsChat
             lblStatus.TextAlign = ContentAlignment.MiddleRight;
             header.Controls.Add(lblStatus);
 
+            btnFiles = new PillButton();
+            btnFiles.Text = "📁  工作区";
+            btnFiles.Ghost = true;
+            btnFiles.Height = 34;
+            btnFiles.Radius = 9;
+            btnFiles.Font = new Font("Microsoft YaHei UI", 9f);
+            btnFiles.Width = 116;
+            btnFiles.Click += delegate { OpenWorkspace(); };
+            header.Controls.Add(btnFiles);
+
             msgHost = new Panel();
             msgHost.SetBounds(0, 56, main.ClientSize.Width, Math.Max(0, main.ClientSize.Height - 56 - 104));
             msgHost.AutoScroll = true;
@@ -312,7 +326,7 @@ namespace DsChat
             composerBox.Controls.Add(btnSend);
 
             lblHint = new Label();
-            lblHint.Text = "Enter 发送 · Shift+Enter 换行 · Ctrl+N 新对话 · Ctrl+T 主题 · Ctrl+, 设置";
+            lblHint.Text = "Enter 发送 · Shift+Enter 换行 · Ctrl+N 新对话 · Ctrl+O 工作区 · Ctrl+T 主题 · Ctrl+, 设置";
             lblHint.Font = new Font("Microsoft YaHei UI", 8.5f);
             lblHint.AutoSize = true;
             lblHint.Location = new Point(30, 78);
@@ -356,6 +370,11 @@ namespace DsChat
         {
             if (lblStatus == null || header == null) return;
             lblStatus.Location = new Point(Math.Max(Ui.Px(200), header.Width - lblStatus.Width - Ui.Px(28)), Ui.Px(19));
+            if (btnFiles != null)
+            {
+                int x = Math.Max(Ui.Px(200), lblStatus.Left - btnFiles.Width - Ui.Px(16));
+                btnFiles.Location = new Point(x, Ui.Px(11));
+            }
         }
 
         private void LayoutComposer()
@@ -421,6 +440,10 @@ namespace DsChat
             btnSettings.FillColor = th.Accent;
             btnSettings.BorderColor = th.Border;
             btnSettings.Invalidate();
+            btnFiles.TextColor = th.SubText;
+            btnFiles.FillColor = th.Accent;
+            btnFiles.BorderColor = th.Border;
+            btnFiles.Invalidate();
             btnSend.FillColor = th.Accent;
             btnSend.HoverColor = th.AccentHover;
             btnSend.Invalidate();
@@ -656,6 +679,7 @@ namespace DsChat
         private void ChatForm_KeyDown(object sender, KeyEventArgs e)
         {
             if (e.Control && e.KeyCode == Keys.N) { NewSession(); e.SuppressKeyPress = true; }
+            else if (e.Control && e.KeyCode == Keys.O) { OpenWorkspace(); e.SuppressKeyPress = true; }
             else if (e.Control && e.KeyCode == Keys.Oemcomma) { OpenSettings(); e.SuppressKeyPress = true; }
             else if (e.Control && e.KeyCode == Keys.T) { ToggleTheme(); e.SuppressKeyPress = true; }
         }
@@ -686,28 +710,35 @@ namespace DsChat
             LayoutMessages(true);
             ScrollToBottom();
 
+            turnExtra.Clear();
+            toolRounds = 0;
+            userStopped = false;
+            StartRequest();
+        }
+
+        /// <summary>发起一轮请求（首轮和工具回填后都走这里）。</summary>
+        private void StartRequest()
+        {
             ChatMsg botMsg = new ChatMsg("assistant", "");
-            MessageView botView = AddView(botMsg, false);
+            AddView(botMsg, false);
             streamingIndex = views.Count - 1;
             pending.Length = 0;
             dirty = false;
-            userStopped = false;
             streaming = true;
             atBottom = true;
             SetBusyUi(true);
             LayoutMessages(true);
+            ScrollToBottom();
 
-            List<ChatMsg> payload = new List<ChatMsg>();
-            int start = Math.Max(0, s.Messages.Count - 20);
-            for (int i = start; i < s.Messages.Count; i++) payload.Add(s.Messages[i]);
+            ChatClient cli = new ChatClient(cfg);
+            client = cli;
 
-            client = new ChatClient(cfg);
-            client.OnDelta += delegate (string d)
+            cli.OnDelta += delegate (string d)
             {
                 pending.Append(d);
                 dirty = true;
             };
-            client.OnError += delegate (string err)
+            cli.OnError += delegate (string err)
             {
                 SafeInvoke(delegate
                 {
@@ -723,40 +754,175 @@ namespace DsChat
                     client = null;
                 });
             };
-            client.OnDone += delegate ()
+            cli.OnDone += delegate ()
             {
                 SafeInvoke(delegate
                 {
                     streaming = false;
-                    SetBusyUi(false);
                     dirty = false;
-                    FlushStream();
-                    string content = pending.ToString();
-                    if (content.Trim().Length == 0)
+                    if (!userStopped && cfg.EnableTools && cli.ToolCalls.Count > 0 && toolRounds < MaxToolRounds)
                     {
-                        if (userStopped)
-                        {
-                            RemoveStreamingView();
-                        }
-                        else
-                        {
-                            MessageView ev = AddView(new ChatMsg("assistant", "（没有收到内容，请检查接口路径、模型名称或代理设置）"), false);
-                            ev.SetError();
-                        }
+                        RunTools(cli);
+                        return;
                     }
-                    else
-                    {
-                        s.Messages.Add(new ChatMsg("assistant", content));
-                    }
-                    pending.Length = 0;
-                    LayoutMessages(true);
-                    ScrollToBottom();
-                    SetStatus(userStopped ? "● 已停止" : "● 已连接", !userStopped);
-                    SaveSessions();
-                    client = null;
+                    FinishTurn();
                 });
             };
-            client.Send(payload);
+
+            cli.Send(BuildPayload());
+        }
+
+        private List<ChatMsg> BuildPayload()
+        {
+            Session s = sessions[active];
+            List<ChatMsg> payload = new List<ChatMsg>();
+            int start = Math.Max(0, s.Messages.Count - 20);
+            for (int i = start; i < s.Messages.Count; i++) payload.Add(s.Messages[i]);
+            payload.AddRange(turnExtra);
+            return payload;
+        }
+
+        private void FinishTurn()
+        {
+            Session s = sessions[active];
+            SetBusyUi(false);
+            FlushStream();
+            string content = pending.ToString();
+            if (content.Trim().Length == 0)
+            {
+                if (userStopped)
+                {
+                    RemoveStreamingView();
+                }
+                else
+                {
+                    string hint = toolRounds > 0
+                        ? "（本轮进行了 " + toolRounds + " 轮工具调用，但模型没有返回文字结果；可以再发一句「继续」，或检查工作区设置）"
+                        : "（没有收到内容，请检查接口路径、模型名称或代理设置）";
+                    MessageView ev = AddView(new ChatMsg("assistant", hint), false);
+                    ev.SetError();
+                }
+            }
+            else
+            {
+                s.Messages.Add(new ChatMsg("assistant", content));
+            }
+            pending.Length = 0;
+            turnExtra.Clear();
+            LayoutMessages(true);
+            ScrollToBottom();
+            SetStatus(userStopped ? "● 已停止" : "● 已连接", !userStopped);
+            SaveSessions();
+            client = null;
+        }
+
+        // ================= 工作区工具 =================
+        private void RunTools(ChatClient cli)
+        {
+            toolRounds++;
+            string partial = pending.ToString();
+            List<ToolCall> calls = cli.ToolCalls;
+
+            if (partial.Trim().Length == 0) RemoveStreamingView();
+            pending.Length = 0;
+
+            ChatMsg asst = new ChatMsg("assistant", partial);
+            asst.ToolCalls = calls;
+            turnExtra.Add(asst);
+
+            foreach (ToolCall tc in calls)
+            {
+                string summary;
+                string result = ExecuteTool(tc, out summary);
+                ChatMsg tool = new ChatMsg("tool", result);
+                tool.ToolCallId = tc.Id;
+                turnExtra.Add(tool);
+                MessageView v = AddView(new ChatMsg("assistant", summary), false);
+                v.SetTool();
+            }
+
+            LayoutMessages(true);
+            ScrollToBottom();
+            if (userStopped) { FinishTurn(); return; }
+            StartRequest();
+        }
+
+        private string ExecuteTool(ToolCall tc, out string summary)
+        {
+            summary = "🔧 调用工具：" + tc.Name;
+            try
+            {
+                string name = tc.Name == null ? "" : tc.Name.Trim();
+                if (name == "list_files")
+                {
+                    string sub = ArgOf(tc.Arguments, "subdir");
+                    string text = Workspace.ListFiles(cfg.Workspace, sub);
+                    summary = "🔧 列出工作区" + (string.IsNullOrEmpty(sub) ? "" : " / " + sub);
+                    return text;
+                }
+                if (name == "read_file")
+                {
+                    string rel = ArgOf(tc.Arguments, "path");
+                    string text = Workspace.ReadText(cfg.Workspace, rel);
+                    summary = "🔧 读取 " + rel + "（" + Workspace.FormatSize(text.Length) + "）";
+                    return text;
+                }
+                if (name == "write_file")
+                {
+                    string rel = ArgOf(tc.Arguments, "path");
+                    string content = ArgOf(tc.Arguments, "content");
+                    if (cfg.ConfirmWrites && !ConfirmWrite(rel, content)) return "用户拒绝了这次写入，请不要重复尝试。";
+                    int n = Workspace.WriteText(cfg.Workspace, rel, content);
+                    summary = "🔧 写入 " + rel + "（" + n + " 字符）";
+                    return "写入成功：" + rel + "，" + n + " 个字符。";
+                }
+                if (name == "delete_file")
+                {
+                    string rel = ArgOf(tc.Arguments, "path");
+                    if (cfg.ConfirmWrites && !ConfirmDelete(rel)) return "用户拒绝了这次删除，请不要重复尝试。";
+                    Workspace.Delete(cfg.Workspace, rel);
+                    summary = "🔧 删除 " + rel;
+                    return "已删除：" + rel;
+                }
+                return "未知工具：" + name;
+            }
+            catch (Exception ex)
+            {
+                summary = "⚠ 工具执行失败：" + tc.Name;
+                return "执行失败：" + ex.Message;
+            }
+        }
+
+        private bool ConfirmWrite(string rel, string content)
+        {
+            string preview = content == null ? "" : content.Replace("\r", "");
+            if (preview.Length > 400) preview = preview.Substring(0, 400) + "\n…";
+            string msg = "AI 想写入文件：\n" + rel + "\n\n预览：\n" + preview + "\n\n允许写入吗？";
+            return MessageBox.Show(this, msg, "确认写入", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
+        }
+
+        private bool ConfirmDelete(string rel)
+        {
+            string msg = "AI 想删除：" + rel + "\n\n这个操作不可撤销，允许吗？";
+            return MessageBox.Show(this, msg, "确认删除", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+        }
+
+        /// <summary>从工具调用的 JSON 参数里取字符串字段。</summary>
+        private static string ArgOf(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json)) return "";
+            try
+            {
+                System.Web.Script.Serialization.JavaScriptSerializer js = new System.Web.Script.Serialization.JavaScriptSerializer();
+                Dictionary<string, object> d = js.DeserializeObject(json) as Dictionary<string, object>;
+                if (d != null)
+                {
+                    object v;
+                    if (d.TryGetValue(key, out v) && v != null) return Convert.ToString(v);
+                }
+            }
+            catch { }
+            return "";
         }
 
         private void StopStreaming()
@@ -835,6 +1001,43 @@ namespace DsChat
                     UpdateStatusIdle();
                 }
             }
+        }
+
+        // ================= 工作区 =================
+        private void OpenWorkspace()
+        {
+            using (WorkspaceForm f = new WorkspaceForm(cfg, th, LastAssistantText()))
+            {
+                f.OnInsert = delegate (string text)
+                {
+                    if (string.IsNullOrEmpty(text)) return;
+                    if (input.TextLength > 0) input.AppendText("\r\n\r\n");
+                    input.AppendText(text);
+                    input.SelectionStart = input.TextLength;
+                    input.Focus();
+                };
+                f.OnChanged = delegate (Config updated)
+                {
+                    if (updated == null) return;
+                    cfg.Workspace = updated.Workspace;
+                    cfg.EnableTools = updated.EnableTools;
+                    cfg.ConfirmWrites = updated.ConfirmWrites;
+                    cfg.Save();
+                    UpdateStatusIdle();
+                };
+                f.ShowDialog(this);
+            }
+        }
+
+        private string LastAssistantText()
+        {
+            Session s = sessions[active];
+            for (int i = s.Messages.Count - 1; i >= 0; i--)
+            {
+                ChatMsg m = s.Messages[i];
+                if (m.Role == "assistant" && m.Content != null && m.Content.Trim().Length > 0) return m.Content;
+            }
+            return "";
         }
 
         // ================= 持久化 =================

@@ -23,6 +23,15 @@ namespace DsChat
         public double Temperature = 0.7;
         public int MaxTokens = 0;
 
+        /// <summary>true = 使用系统/环境变量代理；false 等价 Python 的 trust_env=False（直连，内网必需）</summary>
+        public bool TrustEnv = false;
+        /// <summary>工作区目录，AI 与文件面板只能在这个目录内操作</summary>
+        public string Workspace = "";
+        /// <summary>是否给模型提供工作区文件工具（OpenAI function calling）</summary>
+        public bool EnableTools = false;
+        /// <summary>AI 写文件/删文件前是否弹窗确认</summary>
+        public bool ConfirmWrites = true;
+
         public static string Dir
         {
             get
@@ -43,6 +52,7 @@ namespace DsChat
             c.Proxy = Proxy; c.ProxyUser = ProxyUser; c.ProxyPass = ProxyPass;
             c.SystemPrompt = SystemPrompt; c.Stream = Stream; c.Dark = Dark; c.IgnoreCert = IgnoreCert;
             c.TimeoutSeconds = TimeoutSeconds; c.Temperature = Temperature; c.MaxTokens = MaxTokens;
+            c.TrustEnv = TrustEnv; c.Workspace = Workspace; c.EnableTools = EnableTools; c.ConfirmWrites = ConfirmWrites;
             return c;
         }
 
@@ -77,6 +87,10 @@ namespace DsChat
                         case "TimeoutSeconds": c.TimeoutSeconds = ParseInt(v, 120); break;
                         case "Temperature": c.Temperature = ParseDouble(v, 0.7); break;
                         case "MaxTokens": c.MaxTokens = ParseInt(v, 0); break;
+                        case "TrustEnv": c.TrustEnv = v == "1"; break;
+                        case "Workspace": c.Workspace = v; break;
+                        case "EnableTools": c.EnableTools = v == "1"; break;
+                        case "ConfirmWrites": c.ConfirmWrites = v == "1"; break;
                     }
                 }
             }
@@ -104,6 +118,10 @@ namespace DsChat
                 sb.AppendLine("TimeoutSeconds=" + TimeoutSeconds);
                 sb.AppendLine("Temperature=" + Temperature.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 sb.AppendLine("MaxTokens=" + MaxTokens);
+                sb.AppendLine("TrustEnv=" + (TrustEnv ? "1" : "0"));
+                sb.AppendLine("Workspace=" + Escape(Workspace));
+                sb.AppendLine("EnableTools=" + (EnableTools ? "1" : "0"));
+                sb.AppendLine("ConfirmWrites=" + (ConfirmWrites ? "1" : "0"));
                 File.WriteAllText(FilePath, sb.ToString(), new UTF8Encoding(false));
             }
             catch { }

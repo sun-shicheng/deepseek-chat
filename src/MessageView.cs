@@ -150,6 +150,7 @@ namespace DsChat
         public bool IsUser;
         public bool IsError;
         public bool IsTyping;
+        public bool IsTool;
 
         private RichTextBox rtb;
         private Theme th;
@@ -208,9 +209,17 @@ namespace DsChat
             Reflow(Width);
         }
 
+        /// <summary>工具调用的提示行：用次要色，视觉上像系统提示。</summary>
+        public void SetTool()
+        {
+            IsTool = true;
+            Render();
+            Reflow(Width);
+        }
+
         private void Render()
         {
-            Color fg = IsError ? th.Danger : (IsUser ? th.UserText : th.BotText);
+            Color fg = IsError ? th.Danger : (IsUser ? th.UserText : (IsTool ? th.SubText : th.BotText));
             rtb.ForeColor = fg;
             if (IsError)
             {

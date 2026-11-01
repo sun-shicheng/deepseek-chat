@@ -12,7 +12,7 @@ namespace DsChat
 
         private TextBox tBase, tPath, tKey, tModel, tProxy, tProxyUser, tProxyPass, tSystem;
         private NumericUpDown nTimeout, nTemp, nMaxTokens;
-        private CheckBox cStream, cIgnoreCert, cShowKey;
+        private CheckBox cStream, cIgnoreCert, cShowKey, cTrust;
         private Label lblStatus;
         private Button btnTest, btnSave, btnCancel;
         private bool testing;
@@ -29,7 +29,7 @@ namespace DsChat
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterParent;
-            ClientSize = new Size(620, 664);
+            ClientSize = new Size(620, 692);
             BackColor = th.Bg;
             ForeColor = th.Text;
             Font = new Font("Microsoft YaHei UI", 9.75f);
@@ -141,6 +141,13 @@ namespace DsChat
             Controls.Add(cIgnoreCert);
             y += 30;
 
+            cTrust = new CheckBox();
+            cTrust.Text = "忽略系统代理与环境变量代理（内网直连，等价 trust_env=False）";
+            cTrust.AutoSize = true;
+            cTrust.Location = new Point(x, y);
+            Controls.Add(cTrust);
+            y += 30;
+
             btnTest = new Button();
             btnTest.Text = "测试连接";
             btnTest.Size = new Size(100, 32);
@@ -232,6 +239,7 @@ namespace DsChat
             tSystem.Text = cfg.SystemPrompt;
             cStream.Checked = cfg.Stream;
             cIgnoreCert.Checked = cfg.IgnoreCert;
+            cTrust.Checked = !cfg.TrustEnv;
             nTimeout.Value = Math.Min(600, Math.Max(10, cfg.TimeoutSeconds));
             nTemp.Value = (decimal)Math.Min(2, Math.Max(0, cfg.Temperature));
             nMaxTokens.Value = Math.Min(32000, Math.Max(0, cfg.MaxTokens));
@@ -250,6 +258,7 @@ namespace DsChat
             c.SystemPrompt = tSystem.Text;
             c.Stream = cStream.Checked;
             c.IgnoreCert = cIgnoreCert.Checked;
+            c.TrustEnv = !cTrust.Checked;
             c.TimeoutSeconds = (int)nTimeout.Value;
             c.Temperature = (double)nTemp.Value;
             c.MaxTokens = (int)nMaxTokens.Value;

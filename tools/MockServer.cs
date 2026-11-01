@@ -56,6 +56,32 @@ internal static class MockServer
                 if (wantSse)
                 {
                     Write(ns, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n");
+
+                    // 工具调用联调分支：用户消息里带 tooltest 时返回 tool_calls
+                    if (body.Contains("\"role\":\"tool\""))
+                    {
+                        string done = "工具已执行完毕，任务完成。";
+                        foreach (string piece in Split(done, 4))
+                            Write(ns, "data: {\"choices\":[{\"delta\":{\"content\":\"" + Escape(piece) + "\"}}]}\n\n");
+                        Write(ns, "data: [DONE]\n\n");
+                        ns.Flush();
+                        return;
+                    }
+                    if (body.Contains("tooltest"))
+                    {
+                        if (body.Contains("tooltest:evil"))
+                            EmitToolCall(ns, "write_file", "{\"path\":\"../evil.txt\",\"content\":\"should be rejected\"}");
+                        else if (body.Contains("tooltest:write"))
+                            EmitToolCall(ns, "write_file", "{\"path\":\"ai_test.txt\",\"content\":\"hello from mock server\\n第二行中文\"}");
+                        else if (body.Contains("tooltest:read"))
+                            EmitToolCall(ns, "read_file", "{\"path\":\"readme_probe.txt\"}");
+                        else
+                            EmitToolCall(ns, "list_files", "{\"subdir\":\"\"}");
+                        Write(ns, "data: [DONE]\n\n");
+                        ns.Flush();
+                        return;
+                    }
+
                     string answer = "你好！我是本地模拟服务，用来验证流式输出。\n\n" +
                                     "**重点**：界面支持 `行内代码`、加粗和代码块。\n\n" +
                                     "- 第一项\n- 第二项\n\n" +
@@ -86,6 +112,23 @@ internal static class MockServer
         {
             Log(logPath, "ERR " + ex.Message);
         }
+    }
+
+    /// <summary>模拟流式 tool_calls：先发 name/id，再按小块发 arguments。</summary>
+    private static void EmitToolCall(NetworkStream ns, string name, string argsJson)
+    {
+        Write(ns, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_mock_1\",\"type\":\"function\",\"function\":{\"name\":\"" + name + "\",\"arguments\":\"\"}}]}}]}\n\n");
+        foreach (string piece in Split(argsJson, 7))
+            Write(ns, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"" + Escape(piece) + "\"}}]}}]}\n\n");
+        Write(ns, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n");
+    }
+
+    private static System.Collections.Generic.List<string> Split(string s, int size)
+    {
+        System.Collections.Generic.List<string> list = new System.Collections.Generic.List<string>();
+        for (int i = 0; i < s.Length; i += size)
+            list.Add(s.Substring(i, Math.Min(size, s.Length - i)));
+        return list;
     }
 
     private static string ReadHeader(NetworkStream ns)
