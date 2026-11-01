@@ -57,13 +57,19 @@ internal static class ConfirmFlowTest
             string want = allowTurn ? "本轮全部允许" : "允许";
             foreach (Control c in dlg.Controls)
             {
-                Button b = c as Button;
-                if (b != null && b.Text == want) { b.PerformClick(); return; }
+                if (c.Text == want)
+                {
+                    c.GetType().GetMethod("PerformClick").Invoke(c, null);
+                    return;
+                }
             }
             foreach (Control c in dlg.Controls)
             {
-                Button b = c as Button;
-                if (b != null && b.Text == "允许") { b.PerformClick(); return; }
+                if (c.Text == "允许")
+                {
+                    c.GetType().GetMethod("PerformClick").Invoke(c, null);
+                    return;
+                }
             }
         };
         t.Start();

@@ -1,4 +1,4 @@
-# 编译 DeepSeek Chat 为单个 exe（使用系统自带 .NET Framework 编译器，无需联网）
+# 编译 Lumi 为单个 exe（使用系统自带 .NET Framework 编译器，无需联网）
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 
@@ -13,11 +13,22 @@ $refNames = @(
     'System.Drawing.dll',
     'System.Windows.Forms.dll',
     'System.Web.Extensions.dll',
-    'System.Security.dll'
+    'System.Security.dll',
+    'System.IO.Compression.dll',
+    'System.Xml.dll'
 )
 
-$out = Join-Path $root 'DeepSeekChat.exe'
+$out = Join-Path $root 'Lumi.exe'
 $ico = Join-Path $root 'app.ico'
+
+# Regenerate app.ico from src\Brand.cs on every build so a stale icon is never embedded.
+$mkIcon = Join-Path $root 'make-icon.ps1'
+if (Test-Path -LiteralPath $mkIcon) {
+    Write-Host 'Generating app.ico...'
+    & $mkIcon
+    $iconGenExe = Join-Path $root 'tools\IconGen.exe'
+    if (Test-Path $iconGenExe) { Remove-Item -Force $iconGenExe }
+}
 
 $argList = New-Object System.Collections.Generic.List[string]
 $argList.Add('/nologo')

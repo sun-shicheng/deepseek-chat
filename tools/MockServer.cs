@@ -52,10 +52,48 @@ internal static class MockServer
                 string body = Encoding.UTF8.GetString(bodyBytes, 0, read);
                 Log(logPath, DateTime.Now.ToString("HH:mm:ss") + " " + reqLine + " | " + body);
 
+                if (reqLine.StartsWith("GET ", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (reqLine.IndexOf("/v1/models", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        string json = "{\"data\":[{\"id\":\"model-a\"},{\"id\":\"model-b\"}]}";
+                        byte[] data = Encoding.UTF8.GetBytes(json);
+                        Write(ns, "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + data.Length + "\r\nConnection: close\r\n\r\n");
+                        ns.Write(data, 0, data.Length);
+                        ns.Flush();
+                    }
+                    else
+                    {
+                        Write(ns, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    }
+                    return;
+                }
+
                 bool wantSse = body.Contains("\"stream\":true");
                 if (wantSse)
                 {
                     Write(ns, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n");
+
+                    // “只说不做”测试：第一轮只声称已写入，自动重试后才真正调用 write_file
+                    if (body.Contains("writeclaimfail"))
+                    {
+                        EmitText(ns, "已写入 claimed.txt。");
+                        Write(ns, "data: [DONE]\n\n");
+                        ns.Flush();
+                        return;
+                    }
+                    if (body.Contains("writeclaim"))
+                    {
+                        if (body.Contains("\"role\":\"tool\""))
+                            EmitText(ns, "已写入完成。");
+                        else if (body.Contains("没有实际调用 write_file"))
+                            EmitToolCall(ns, "write_file", "{\"path\":\"claimed.txt\",\"content\":\"written by mock\"}");
+                        else
+                            EmitText(ns, "已写入 claimed.txt。");
+                        Write(ns, "data: [DONE]\n\n");
+                        ns.Flush();
+                        return;
+                    }
 
                     // 重复写入测试：模型每轮都要求写入同一个文件
                     if (body.Contains("writeloop"))
@@ -155,6 +193,12 @@ internal static class MockServer
         {
             Log(logPath, "ERR " + ex.Message);
         }
+    }
+
+    private static void EmitText(NetworkStream ns, string text)
+    {
+        foreach (string piece in Split(text, 4))
+            Write(ns, "data: {\"choices\":[{\"delta\":{\"content\":\"" + Escape(piece) + "\"}}]}\n\n");
     }
 
     /// <summary>模拟流式 tool_calls：先发 name/id，再按小块发 arguments。</summary>

@@ -24,7 +24,7 @@ namespace DsChat
         public string ToolCallId;
         /// <summary>role=assistant 且模型要求调用工具时，这里非空</summary>
         public List<ToolCall> ToolCalls;
-        /// <summary>DeepSeek 思考模型的 reasoning_content；工具调用回放时需要带回去</summary>
+        /// <summary>思考模型的 reasoning_content；工具调用回放时需要带回去</summary>
         public string ReasoningContent;
 
         public ChatMsg(string role, string content) { Role = role; Content = content; }
@@ -42,7 +42,7 @@ namespace DsChat
     public class ChatClient
     {
         private Config cfg;
-        private HttpWebRequest request;
+        private volatile HttpWebRequest request;
         private volatile bool cancelled;
 
         public event Action<string> OnDelta;
@@ -99,9 +99,11 @@ namespace DsChat
 
         private void Run(List<ChatMsg> messages)
         {
+            if (cancelled) { FireDone(); return; }
             string url = BuildUrl();
             HttpWebRequest r = (HttpWebRequest)WebRequest.Create(url);
             request = r;
+            if (cancelled) { try { r.Abort(); } catch { } FireDone(); return; }
             r.Method = "POST";
             r.ContentType = "application/json; charset=utf-8";
             r.Accept = cfg.Stream ? "text/event-stream" : "application/json";
@@ -174,6 +176,73 @@ namespace DsChat
             return b + p;
         }
 
+        /// <summary>
+        /// 启动时的轻量自检：请求 /v1/models 判断接口/Key/网络是否可用，不消耗对话 token。
+        /// 返回：就绪 / Key 无效 / 连接失败 / 未配置接口 / 未配置 Key。
+        /// </summary>
+        public static string CheckConnection(Config c)
+        {
+            if (c == null || string.IsNullOrEmpty(c.BaseUrl)) return "未配置接口";
+            if (string.IsNullOrEmpty(c.ApiKey)) return "未配置 Key";
+
+            try
+            {
+                string url = BuildModelsUrl(c);
+                if (url.Length == 0) return "未配置接口";
+
+                HttpWebRequest r = (HttpWebRequest)WebRequest.Create(url);
+                r.Method = "GET";
+                r.Accept = "application/json";
+                r.Headers["Authorization"] = "Bearer " + (c.ApiKey == null ? "" : c.ApiKey);
+                r.KeepAlive = false;
+                r.Timeout = 8000;
+                r.ReadWriteTimeout = 8000;
+
+                ChatClient probe = new ChatClient(c);
+                IWebProxy proxy = probe.BuildProxy();
+                if (proxy != null) r.Proxy = proxy;
+                if (c.IgnoreCert)
+                    ServicePointManager.ServerCertificateValidationCallback = delegate { return true; };
+                try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
+                try { ServicePointManager.Expect100Continue = false; } catch { }
+
+                using (HttpWebResponse resp = (HttpWebResponse)r.GetResponse())
+                    return "就绪";
+            }
+            catch (WebException wex)
+            {
+                HttpWebResponse resp = wex.Response as HttpWebResponse;
+                if (resp != null)
+                {
+                    try
+                    {
+                        int code = (int)resp.StatusCode;
+                        // 有些网关不提供 /v1/models 或不允许列模型，但对话接口本身可用
+                        if (code == 400 || code == 403 || code == 404 || code == 405) return "就绪";
+                        if (code == 401) return "Key 无效";
+                    }
+                    catch { }
+                    finally { try { resp.Close(); } catch { } }
+                }
+                return "连接失败";
+            }
+            catch { return "连接失败"; }
+        }
+
+        private static string BuildModelsUrl(Config c)
+        {
+            string path = c.ApiPath == null ? "" : c.ApiPath.Trim();
+            if (path.StartsWith("http://") || path.StartsWith("https://"))
+            {
+                int idx = path.LastIndexOf('/');
+                if (idx > 0) return path.Substring(0, idx) + "/models";
+            }
+            string b = (c.BaseUrl == null ? "" : c.BaseUrl.Trim()).TrimEnd('/');
+            if (b.Length == 0) return "";
+            if (b.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)) return b + "/models";
+            return b + "/v1/models";
+        }
+
         private IWebProxy BuildProxy()
         {
             if (string.IsNullOrEmpty(cfg.Proxy))
@@ -202,7 +271,7 @@ namespace DsChat
 
         /// <summary>
         /// 防御性清理：确保每个 tool 消息都紧跟在发起它的 assistant.tool_calls 后面，
-        /// 缺失的工具结果补占位，避免 DeepSeek 报 “role 'tool' must be ... tool_calls”。
+        /// 缺失的工具结果补占位，避免网关报 “role 'tool' must be ... tool_calls”。
         /// </summary>
         private static List<ChatMsg> SanitizeMessages(List<ChatMsg> msgs)
         {
@@ -262,20 +331,37 @@ namespace DsChat
             return result;
         }
 
+        /// <summary>“简洁回答”追加在系统提示词末尾，减少输出 token。</summary>
+        public const string ConciseSuffix = "回答简洁：先给结论，省略寒暄、重复和无关细节。";
+        /// <summary>开启文件工具时强调“先调用工具、再汇报结果”，避免模型只说已写入但没调用。</summary>
+        public const string FileToolRule = "涉及读取、写入、创建、修改、删除文件时，必须先实际调用工具；不要在未调用工具时声称已写入、已保存或已完成。写入后以工具结果为准。";
+
+        public static string ComposeSystemPrompt(Config c)
+        {
+            string sys = c == null || c.SystemPrompt == null ? "" : c.SystemPrompt;
+            if (c != null && c.Concise)
+                sys = sys.Length == 0 ? ConciseSuffix : sys + "\n" + ConciseSuffix;
+            if (c != null && c.EnableTools && Workspace.IsReady(c.Workspace))
+                sys = sys.Length == 0 ? FileToolRule : sys + "\n" + FileToolRule;
+            return sys;
+        }
+
         private string BuildBody(List<ChatMsg> msgs, bool stream)
         {
             msgs = SanitizeMessages(msgs);
+            bool useTools = cfg.EnableTools && Workspace.IsReady(cfg.Workspace);
             StringBuilder sb = new StringBuilder();
             sb.Append("{\"model\":\"").Append(Json.Escape(cfg.Model)).Append("\",\"messages\":[");
             bool first = true;
-            if (!string.IsNullOrEmpty(cfg.SystemPrompt))
+            string sys = ComposeSystemPrompt(cfg);
+            if (sys.Length > 0)
             {
-                sb.Append("{\"role\":\"system\",\"content\":\"").Append(Json.Escape(cfg.SystemPrompt)).Append("\"}");
+                sb.Append("{\"role\":\"system\",\"content\":\"").Append(Json.Escape(sys)).Append("\"}");
                 first = false;
             }
             foreach (ChatMsg m in msgs)
             {
-                string part = MsgJson(m);
+                string part = MsgJson(m, useTools);
                 if (part == null) continue;
                 if (!first) sb.Append(',');
                 sb.Append(part);
@@ -284,14 +370,18 @@ namespace DsChat
             sb.Append("],\"stream\":").Append(stream ? "true" : "false");
             sb.Append(",\"temperature\":").Append(cfg.Temperature.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (cfg.MaxTokens > 0) sb.Append(",\"max_tokens\":").Append(cfg.MaxTokens);
-            if (cfg.EnableTools && Workspace.IsReady(cfg.Workspace))
+            if (useTools)
                 sb.Append(",\"tool_choice\":\"auto\",\"tools\":").Append(ToolsJson());
             sb.Append('}');
             return sb.ToString();
         }
 
-        /// <summary>序列化单条消息，支持 tool 角色与 assistant.tool_calls。</summary>
-        private static string MsgJson(ChatMsg m)
+        /// <summary>
+        /// 序列化单条消息，支持 tool 角色与 assistant.tool_calls。
+        /// sendReasoning：只有请求携带 tools 时才回传 reasoning_content（思考模式 + 工具调用的协议要求）；
+        /// 不带 tools 时 API 会忽略它，回传只会白花输入 token。
+        /// </summary>
+        private static string MsgJson(ChatMsg m, bool sendReasoning)
         {
             if (m == null) return null;
             if (m.Role == "tool")
@@ -306,7 +396,7 @@ namespace DsChat
             sb.Append("{\"role\":\"").Append(Json.Escape(m.Role)).Append("\",\"content\":");
             if (m.Content == null || m.Content.Length == 0) sb.Append("\"\"");
             else sb.Append('"').Append(Json.Escape(m.Content)).Append('"');
-            if (m.Role == "assistant" && !string.IsNullOrEmpty(m.ReasoningContent))
+            if (sendReasoning && m.Role == "assistant" && !string.IsNullOrEmpty(m.ReasoningContent))
                 sb.Append(",\"reasoning_content\":\"").Append(Json.Escape(m.ReasoningContent)).Append('"');
             if (hasCalls)
             {
@@ -328,16 +418,16 @@ namespace DsChat
         private static string ToolsJson()
         {
             StringBuilder sb = new StringBuilder("[");
-            sb.Append(ToolJson("list_files", "列出工作区里的文件与子目录（相对路径）",
-                "{\"type\":\"object\",\"properties\":{\"subdir\":{\"type\":\"string\",\"description\":\"相对工作区的子目录，留空表示根目录\"}},\"required\":[]}"));
+            sb.Append(ToolJson("list_files", "列出工作区文件和目录（相对路径）",
+                "{\"type\":\"object\",\"properties\":{\"subdir\":{\"type\":\"string\",\"description\":\"子目录，留空为根目录\"}},\"required\":[]}"));
             sb.Append(',');
-            sb.Append(ToolJson("read_file", "读取工作区里的文本文件内容",
-                "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"相对工作区的文件路径\"}},\"required\":[\"path\"]}"));
+            sb.Append(ToolJson("read_file", "读取工作区文件：文本（.py/.c/.txt 等）或 .xlsx/.docx；分页",
+                "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"相对工作区的文件路径\"},\"start_line\":{\"type\":\"integer\",\"description\":\"起始行，默认 1\"},\"max_lines\":{\"type\":\"integer\",\"description\":\"最多读取行数，默认 200，最大 400\"}},\"required\":[\"path\"]}"));
             sb.Append(',');
-            sb.Append(ToolJson("write_file", "把文本写入工作区文件，覆盖同名文件，目录不存在会自动创建",
-                "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"相对工作区的文件路径\"},\"content\":{\"type\":\"string\",\"description\":\"完整文本内容\"}},\"required\":[\"path\",\"content\"]}"));
+            sb.Append(ToolJson("write_file", "写入文件（覆盖），目录自动创建；文本原样写入，.xlsx 用 CSV/TSV，.docx 用纯文本段落",
+                "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"相对工作区的文件路径（可含 .xlsx/.docx/.py/.c 等扩展名）\"},\"content\":{\"type\":\"string\",\"description\":\"完整文本内容；.xlsx 用 CSV/TSV/ Markdown 表格；.docx 用纯文本段落\"}},\"required\":[\"path\",\"content\"]}"));
             sb.Append(',');
-            sb.Append(ToolJson("delete_file", "删除工作区里的文件或空目录",
+            sb.Append(ToolJson("delete_file", "删除工作区文件或空目录",
                 "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"相对工作区的路径\"}},\"required\":[\"path\"]}"));
             sb.Append(']');
             return sb.ToString();

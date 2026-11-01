@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
-using System.Drawing.Text;
 using System.IO;
+using DsChat;
 
 // 生成多尺寸 PNG 压缩 ICO：tools\..\app.ico
 internal static class IconGen
@@ -22,30 +22,8 @@ internal static class IconGen
                 using (Graphics g = Graphics.FromImage(bmp))
                 {
                     g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
                     g.Clear(Color.Transparent);
-
-                    RectangleF rect = new RectangleF(0.5f, 0.5f, s - 1f, s - 1f);
-                    using (GraphicsPath path = Rounded(rect, Math.Max(2f, s * 0.24f)))
-                    using (LinearGradientBrush brush = new LinearGradientBrush(
-                        new RectangleF(0, 0, s, s),
-                        Color.FromArgb(112, 140, 255),
-                        Color.FromArgb(56, 82, 226),
-                        45f))
-                    {
-                        g.FillPath(brush, path);
-                    }
-
-                    string letter = "D";
-                    using (FontFamily fam = new FontFamily("Segoe UI"))
-                    using (Font font = new Font(fam, s * 0.58f, FontStyle.Bold, GraphicsUnit.Pixel))
-                    using (StringFormat fmt = new StringFormat())
-                    {
-                        fmt.Alignment = StringAlignment.Center;
-                        fmt.LineAlignment = StringAlignment.Center;
-                        using (SolidBrush white = new SolidBrush(Color.White))
-                            g.DrawString(letter, font, white, new RectangleF(0, -s * 0.02f, s, s), fmt);
-                    }
+                    Brand.Draw(g, new RectangleF(0.5f, 0.5f, s - 1f, s - 1f));
                 }
 
                 using (MemoryStream ms = new MemoryStream())
@@ -79,17 +57,5 @@ internal static class IconGen
             foreach (byte[] p in pngs) bw.Write(p);
         }
         Console.WriteLine("icon written: " + Path.GetFullPath(outPath) + " " + new FileInfo(outPath).Length + " bytes");
-    }
-
-    private static GraphicsPath Rounded(RectangleF r, float radius)
-    {
-        GraphicsPath p = new GraphicsPath();
-        float d = radius * 2f;
-        p.AddArc(r.X, r.Y, d, d, 180, 90);
-        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-        p.CloseFigure();
-        return p;
     }
 }

@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -13,14 +14,19 @@ namespace DsChat
     {
         public string Title = "新对话";
         public List<ChatMsg> Messages = new List<ChatMsg>();
+        /// <summary>该会话最近一次请求的估算输入 token，切换会话时恢复显示。</summary>
+        public int LastInputTokens;
+        public bool Pinned;
+        public DateTime Created = DateTime.Now;
+        public DateTime Updated = DateTime.Now;
     }
 
     /// <summary>圆角按钮（实心 / 幽灵两种）</summary>
     public class PillButton : Control
     {
-        public Color FillColor = Color.FromArgb(77, 107, 254);
-        public Color HoverColor = Color.FromArgb(101, 128, 255);
-        public Color TextColor = Color.White;
+        public Color FillColor = Color.FromArgb(242, 199, 92);
+        public Color HoverColor = Color.FromArgb(248, 215, 126);
+        public Color TextColor = Color.FromArgb(61, 47, 14);
         public Color BorderColor = Color.Transparent;
         public int Radius = 10;
         public bool Ghost;
@@ -35,6 +41,12 @@ namespace DsChat
 
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
         protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            Color bg = Parent == null ? SystemColors.Control : Parent.BackColor;
+            e.Graphics.Clear(bg);
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -67,12 +79,101 @@ namespace DsChat
         }
     }
 
-    /// <summary>侧边栏里的一个会话条目</summary>
+    /// <summary>左上角品牌图标：浅黄色圆角方块 + 四角星光。</summary>
+    public class LogoMark : Control
+    {
+        public LogoMark()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            Size = new Size(30, 30);
+            TabStop = false;
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Parent == null ? SystemColors.Control : Parent.BackColor);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Brand.Draw(e.Graphics, new RectangleF(0, 0, Width - 1, Height - 1));
+        }
+    }
+
+    /// <summary>圆形发送按钮：空闲画向上箭头，生成中画停止方块。</summary>
+    public class CircleButton : Control
+    {
+        public Color FillColor = Color.FromArgb(242, 199, 92);
+        public Color HoverColor = Color.FromArgb(248, 215, 126);
+        public Color GlyphColor = Color.FromArgb(61, 47, 14);
+        private bool hover;
+        private bool stop;
+
+        public bool IsStop
+        {
+            get { return stop; }
+            set { if (stop != value) { stop = value; Invalidate(); } }
+        }
+
+        public CircleButton()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            Cursor = Cursors.Hand;
+            Size = new Size(40, 40);
+            AccessibleRole = AccessibleRole.PushButton;
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            Color bg = Parent == null ? SystemColors.Control : Parent.BackColor;
+            e.Graphics.Clear(bg);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (SolidBrush b = new SolidBrush(hover ? HoverColor : FillColor))
+                e.Graphics.FillEllipse(b, 0, 0, Width - 1, Height - 1);
+
+            float cx = Width / 2f;
+            float cy = Height / 2f;
+            if (stop)
+            {
+                float s = Width * 0.20f;
+                using (SolidBrush b = new SolidBrush(Color.White))
+                    e.Graphics.FillRectangle(b, cx - s / 2f, cy - s / 2f, s, s);
+            }
+            else
+            {
+                float h = Width * 0.17f;
+                float w = Width * 0.105f;
+                using (Pen p = new Pen(GlyphColor, Math.Max(2f, Width / 18f)))
+                {
+                    p.StartCap = LineCap.Round;
+                    p.EndCap = LineCap.Round;
+                    e.Graphics.DrawLine(p, cx, cy + h, cx, cy - h);
+                    e.Graphics.DrawLine(p, cx - w, cy - h + w, cx, cy - h);
+                    e.Graphics.DrawLine(p, cx + w, cy - h + w, cx, cy - h);
+                }
+            }
+        }
+    }
+
+    /// <summary>侧边栏里的一个会话条目；右侧三个点打开删除菜单。</summary>
     public class SessionItem : Control
     {
         public string Title = "新对话";
         public bool Selected;
+        public int SessionIndex;
+        public event EventHandler MenuClick;
+
         private bool hover;
+        private bool dotsHover;
+        private bool menuPressed;
+        private bool suppressClick;
         private Theme th;
 
         public SessionItem(Theme theme)
@@ -86,8 +187,63 @@ namespace DsChat
 
         public void ApplyTheme(Theme theme) { th = theme; Invalidate(); }
 
+        private Rectangle DotsRect
+        {
+            get
+            {
+                int w = Ui.Px(28);
+                int h = Ui.Px(28);
+                return new Rectangle(Width - w - Ui.Px(4), (Height - h) / 2, w, h);
+            }
+        }
+
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; dotsHover = false; menuPressed = false; Invalidate(); base.OnMouseLeave(e); }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            bool hit = DotsRect.Contains(e.Location);
+            if (hit != dotsHover) { dotsHover = hit; Invalidate(); }
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left && DotsRect.Contains(e.Location))
+            {
+                menuPressed = true;
+                Invalidate();
+                return;
+            }
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (menuPressed)
+            {
+                bool inside = DotsRect.Contains(e.Location);
+                menuPressed = false;
+                if (!inside)
+                {
+                    suppressClick = false;
+                    Invalidate();
+                    base.OnMouseUp(e);
+                    return;
+                }
+                suppressClick = true;
+                Invalidate();
+                if (MenuClick != null) MenuClick(this, EventArgs.Empty);
+                return;
+            }
+            base.OnMouseUp(e);
+        }
+
+        protected override void OnClick(EventArgs e)
+        {
+            if (suppressClick) { suppressClick = false; return; }
+            base.OnClick(e);
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -99,10 +255,189 @@ namespace DsChat
                 using (SolidBrush b = new SolidBrush(fill))
                     e.Graphics.FillPath(b, p);
             }
-            Rectangle textRect = new Rectangle(Ui.Px(12), 0, Width - Ui.Px(20), Height);
+
+            Rectangle textRect = new Rectangle(Ui.Px(12), 0, Math.Max(20, Width - Ui.Px(46)), Height);
             TextRenderer.DrawText(e.Graphics, Title, Font, textRect,
                 Selected ? th.Text : th.SubText,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+
+            Rectangle dr = DotsRect;
+            if (dotsHover)
+            {
+                using (GraphicsPath hp = Round.Path(dr, Ui.Px(8)))
+                using (SolidBrush hb = new SolidBrush(th.SidebarHover))
+                    e.Graphics.FillPath(hb, hp);
+            }
+            int radius = Math.Max(1, Ui.Px(2));
+            int gap = Ui.Px(4);
+            int cx = dr.Left + dr.Width / 2;
+            int cy = dr.Top + dr.Height / 2;
+            Color dotColor = dotsHover ? th.Text : (Selected ? th.SubText : Color.FromArgb(150, th.SubText));
+            using (SolidBrush b = new SolidBrush(dotColor))
+            {
+                for (int i = -1; i <= 1; i++)
+                    e.Graphics.FillEllipse(b, cx + i * gap - radius, cy - radius, radius * 2, radius * 2);
+            }
+        }
+    }
+
+    /// <summary>会话菜单里的可点击行。</summary>
+    public class MenuRow : Control
+    {
+        private Theme th;
+        private Color textColor;
+        private bool hover;
+
+        public MenuRow(Theme theme, string text, Color color)
+        {
+            th = theme;
+            textColor = color;
+            Text = text;
+            Cursor = Cursors.Hand;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            Font = new Font("Microsoft YaHei UI", 9.75f);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+            if (hover)
+            {
+                using (GraphicsPath p = Round.Path(r, Ui.Px(8)))
+                using (SolidBrush b = new SolidBrush(th.SidebarHover))
+                    e.Graphics.FillPath(b, p);
+            }
+            Rectangle tr = new Rectangle(Ui.Px(12), 0, Width - Ui.Px(24), Height);
+            TextRenderer.DrawText(e.Graphics, Text, Font, tr, textColor,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        }
+    }
+
+    /// <summary>会话右侧三个点菜单：重命名 / 置顶 / 删除，无系统菜单边框。</summary>
+    public class SessionMenu : Form
+    {
+        private Theme th;
+        private MenuRow deleteRow;
+        private bool armed;
+        private Action onDelete;
+
+        public SessionMenu(Theme theme, bool pinned, Action renameAction, Action pinAction, Action deleteAction)
+        {
+            th = theme;
+            onDelete = deleteAction;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            BackColor = th.Bg;
+            DoubleBuffered = true;
+            KeyPreview = true;
+            ClientSize = new Size(220, 138);
+
+            MenuRow rename = new MenuRow(th, "重命名", th.Text);
+            rename.SetBounds(8, 8, 204, 38);
+            rename.Click += delegate { Close(); if (renameAction != null) renameAction(); };
+            Controls.Add(rename);
+
+            MenuRow pin = new MenuRow(th, pinned ? "取消置顶" : "置顶", th.Text);
+            pin.SetBounds(8, 50, 204, 38);
+            pin.Click += delegate { Close(); if (pinAction != null) pinAction(); };
+            Controls.Add(pin);
+
+            deleteRow = new MenuRow(th, "删除对话", th.Danger);
+            deleteRow.SetBounds(8, 92, 204, 38);
+            deleteRow.Click += delegate
+            {
+                if (!armed)
+                {
+                    armed = true;
+                    deleteRow.Text = "再次点击确认删除";
+                    deleteRow.Invalidate();
+                    return;
+                }
+                Close();
+                if (onDelete != null) onDelete();
+            };
+            Controls.Add(deleteRow);
+
+            Paint += delegate (object s, PaintEventArgs e)
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using (GraphicsPath p = Round.Path(new Rectangle(0, 0, Width - 1, Height - 1), Ui.Px(10)))
+                using (Pen pen = new Pen(th.Border, 1f))
+                    e.Graphics.DrawPath(pen, p);
+            };
+            KeyDown += delegate (object s, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) Close(); };
+            Deactivate += delegate { Close(); };
+            Resize += delegate { ApplyRegion(); };
+            if (Math.Abs(Ui.S - 1f) > 0.01f) Scale(new SizeF(Ui.S, Ui.S));
+        }
+
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); ApplyRegion(); }
+
+        private void ApplyRegion()
+        {
+            if (Width <= 0 || Height <= 0) return;
+            using (GraphicsPath p = Round.Path(new Rectangle(0, 0, Width, Height), Ui.Px(10)))
+            {
+                Region old = Region;
+                Region = new Region(p);
+                if (old != null) old.Dispose();
+            }
+        }
+    }
+
+    /// <summary>消息右键菜单：无系统菜单边框，和主界面同色。</summary>
+    public class ActionMenu : Form
+    {
+        private Theme th;
+
+        public ActionMenu(Theme theme, string[] labels, Color[] colors, Action[] actions)
+        {
+            th = theme;
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            BackColor = th.Bg;
+            DoubleBuffered = true;
+            KeyPreview = true;
+            int n = labels == null ? 0 : labels.Length;
+            ClientSize = new Size(210, 8 + n * 42 + 4);
+            for (int i = 0; i < n; i++)
+            {
+                MenuRow row = new MenuRow(th, labels[i], colors == null ? th.Text : colors[i]);
+                row.SetBounds(8, 8 + i * 42, 194, 38);
+                Action action = actions == null ? null : actions[i];
+                row.Click += delegate { Close(); if (action != null) action(); };
+                Controls.Add(row);
+            }
+            Paint += delegate (object s, PaintEventArgs e)
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using (GraphicsPath p = Round.Path(new Rectangle(0, 0, Width - 1, Height - 1), Ui.Px(10)))
+                using (Pen pen = new Pen(th.Border, 1f))
+                    e.Graphics.DrawPath(pen, p);
+            };
+            KeyDown += delegate (object s, KeyEventArgs e) { if (e.KeyCode == Keys.Escape) Close(); };
+            Deactivate += delegate { Close(); };
+            Resize += delegate { ApplyRegion(); };
+            if (Math.Abs(Ui.S - 1f) > 0.01f) Scale(new SizeF(Ui.S, Ui.S));
+        }
+
+        protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); ApplyRegion(); }
+
+        private void ApplyRegion()
+        {
+            if (Width <= 0 || Height <= 0) return;
+            using (GraphicsPath p = Round.Path(new Rectangle(0, 0, Width, Height), Ui.Px(10)))
+            {
+                Region old = Region;
+                Region = new Region(p);
+                if (old != null) old.Dispose();
+            }
         }
     }
 
@@ -115,12 +450,21 @@ namespace DsChat
 
         private Panel sidebar, header, msgHost, composerBox;
         private Panel sessionList;
+        private LogoMark logo;
         private Panel main, composerWrap;
-        private int composerBoxH = Ui.Px(64);
+        private int composerBoxH = Ui.Px(124);
         private TextBox input;
-        private PillButton btnSend, btnNew, btnTheme, btnSettings, btnFiles;
-        private Label lblModel, lblStatus, lblHint;
+        private ListBox mentionList;
+        private List<string> mentionPaths = new List<string>();
+        private int mentionStart = -1;
+        private bool mentionVisible;
+        private CircleButton btnSend;
+        private PillButton btnNew, btnSettings, btnFiles, btnScrollBottom;
+        private Label lblModel, lblStatus, lblTokens, lblHint;
         private List<MessageView> views = new List<MessageView>();
+        private SessionMenu sessionMenu;
+        private ActionMenu messageMenu;
+        private int editMessageIndex = -1;
 
         private ChatClient client;
         private bool streaming;
@@ -131,15 +475,21 @@ namespace DsChat
         private int revealed;
         private bool networkDone;
         private bool turnFinished;
+        private int requestSeq;
         private DateTime lastReveal = DateTime.UtcNow;
         private double revealCarry;
         private const double RevealCharsPerSecond = 140.0;
         private bool userStopped;
         private Timer tick;
+        private Timer themeWatch;
         private bool layingOut;
         private bool atBottom = true;
         /// <summary>本轮对话里临时的 tool_calls / tool 结果消息（不写进会话文件）</summary>
         private List<ChatMsg> turnExtra = new List<ChatMsg>();
+        /// <summary>本轮已经读取过的文件（按 内容长度+修改时间 去重，避免重复把大文件塞进上下文）</summary>
+        private Dictionary<string, string> toolCache = new Dictionary<string, string>();
+        /// <summary>最近一次请求的估算输入 token，用于状态栏展示</summary>
+        private int lastInputTokens;
         private int toolRounds;
         private const int MaxToolRounds = 12;
         private bool toolsAllowed = true;
@@ -148,6 +498,10 @@ namespace DsChat
         private HashSet<string> approvedWritePaths = new HashSet<string>();
         private string lastWriteSig;
         private int sameWriteRepeats;
+        private bool fileChangedThisTurn;
+        private bool writeDeniedThisTurn;
+        private bool autoNudgedThisTurn;
+        private bool userWantsWrite;
 
         private const int SidebarWidth = 252;
 
@@ -168,16 +522,21 @@ namespace DsChat
         public ChatForm(Config c)
         {
             cfg = c;
-            th = Theme.Create(cfg.Dark);
+            th = Theme.Create(Theme.ResolveDark(cfg.ThemeMode));
             BuildUi();
             LoadSessions();
             ApplyThemeAll();
             UpdateStatusIdle();
 
             tick = new Timer();
-            tick.Interval = 35;
+            tick.Interval = 60;
             tick.Tick += delegate { StreamTick(); };
             tick.Start();
+
+            themeWatch = new Timer();
+            themeWatch.Interval = 1500;
+            themeWatch.Tick += delegate { CheckSystemTheme(); };
+            themeWatch.Start();
             Application.AddMessageFilter(this);
         }
 
@@ -215,15 +574,18 @@ namespace DsChat
 
             msgHost.AutoScrollPosition = new Point(0, target);
             atBottom = target >= max - Ui.Px(48);
+            UpdateScrollButton();
         }
 
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            try { input.Focus(); } catch { }
             ApplyScrollbarTheme();
+            Ui.ApplyTitleBarTheme(this, th.IsDark);
+            try { input.Focus(); } catch { }
             LayoutMessages(false);
             ScrollToBottom();
+            StartReadyCheck();
         }
 
         // ================= 界面构建 =================
@@ -231,7 +593,7 @@ namespace DsChat
         {
             SuspendLayout();
             AutoScaleMode = AutoScaleMode.None;
-            Text = "DeepSeek Chat · 本地客户端";
+            Text = "Lumi";
             Font = new Font("Microsoft YaHei UI", 9.75f);
             ClientSize = new Size(1180, 780);
             MinimumSize = new Size(880, 600);
@@ -248,22 +610,20 @@ namespace DsChat
             Controls.Add(main);
 
             // ---- 侧边栏 ----
+            logo = new LogoMark();
+            logo.Size = new Size(30, 30);
+            logo.Location = new Point(22, 28);
+            sidebar.Controls.Add(logo);
+
             Label brand = new Label();
-            brand.Text = "deepseek";
+            brand.Text = "Lumi";
             brand.Font = new Font("Segoe UI Semibold", 16f, FontStyle.Bold);
             brand.AutoSize = true;
-            brand.Location = new Point(22, 22);
+            brand.Location = new Point(60, 28);
             sidebar.Controls.Add(brand);
 
-            Label brandSub = new Label();
-            brandSub.Text = "本地客户端";
-            brandSub.Font = new Font("Microsoft YaHei UI", 8.5f);
-            brandSub.AutoSize = true;
-            brandSub.Location = new Point(24, 52);
-            sidebar.Controls.Add(brandSub);
-
             btnNew = new PillButton();
-            btnNew.Text = "＋   新对话";
+            btnNew.Text = "新对话";
             btnNew.Height = 40;
             btnNew.Location = new Point(16, 84);
             btnNew.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
@@ -286,27 +646,15 @@ namespace DsChat
             sessionList.AutoScroll = true;
             sidebar.Controls.Add(sessionList);
 
-            btnTheme = new PillButton();
-            btnTheme.Text = "◐  切换主题";
-            btnTheme.Ghost = true;
-            btnTheme.Height = 34;
-            btnTheme.Radius = 9;
-            btnTheme.Font = new Font("Microsoft YaHei UI", 9f);
-            btnTheme.Location = new Point(16, ClientSize.Height - 92);
-            btnTheme.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
-            btnTheme.Width = 104;
-            btnTheme.Click += delegate { ToggleTheme(); };
-            sidebar.Controls.Add(btnTheme);
-
             btnSettings = new PillButton();
-            btnSettings.Text = "⚙  设置";
+            btnSettings.Text = "设置";
             btnSettings.Ghost = true;
             btnSettings.Height = 34;
             btnSettings.Radius = 9;
             btnSettings.Font = new Font("Microsoft YaHei UI", 9f);
-            btnSettings.Location = new Point(126, ClientSize.Height - 92);
-            btnSettings.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
-            btnSettings.Width = 104;
+            btnSettings.Location = new Point(16, ClientSize.Height - 92);
+            btnSettings.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            btnSettings.Width = SidebarWidth - 32;
             btnSettings.Click += delegate { OpenSettings(); };
             sidebar.Controls.Add(btnSettings);
 
@@ -314,13 +662,6 @@ namespace DsChat
             header = new BufferedPanel();
             header.SetBounds(0, 0, main.ClientSize.Width, 56);
             main.Controls.Add(header);
-
-            lblModel = new Label();
-            lblModel.Text = cfg.Model;
-            lblModel.Font = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
-            lblModel.AutoSize = true;
-            lblModel.Location = new Point(26, 18);
-            header.Controls.Add(lblModel);
 
             lblStatus = new Label();
             lblStatus.Text = "● 未配置";
@@ -330,15 +671,13 @@ namespace DsChat
             lblStatus.TextAlign = ContentAlignment.MiddleRight;
             header.Controls.Add(lblStatus);
 
-            btnFiles = new PillButton();
-            btnFiles.Text = "📁  工作区";
-            btnFiles.Ghost = true;
-            btnFiles.Height = 34;
-            btnFiles.Radius = 9;
-            btnFiles.Font = new Font("Microsoft YaHei UI", 9f);
-            btnFiles.Width = 116;
-            btnFiles.Click += delegate { OpenWorkspace(); };
-            header.Controls.Add(btnFiles);
+            lblTokens = new Label();
+            lblTokens.Text = "Token ≈ —";
+            lblTokens.Font = new Font("Microsoft YaHei UI", 9f);
+            lblTokens.AutoSize = true;
+            lblTokens.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            lblTokens.TextAlign = ContentAlignment.MiddleRight;
+            header.Controls.Add(lblTokens);
 
             msgHost = new BufferedPanel();
             msgHost.SetBounds(0, 56, main.ClientSize.Width, Math.Max(0, main.ClientSize.Height - 56 - 104));
@@ -349,14 +688,31 @@ namespace DsChat
             {
                 if (layingOut) return;
                 atBottom = msgHost.VerticalScroll.Value >= msgHost.VerticalScroll.Maximum - Ui.Px(48);
+                UpdateScrollButton();
             };
 
             composerWrap = new BufferedPanel();
             composerWrap.SetBounds(0, Math.Max(56, main.ClientSize.Height - 104), main.ClientSize.Width, 104);
+            composerWrap.BackColor = th.Bg;
             main.Controls.Add(composerWrap);
 
+            btnScrollBottom = new PillButton();
+            btnScrollBottom.Text = "↓";
+            btnScrollBottom.Ghost = true;
+            btnScrollBottom.Radius = 19;
+            btnScrollBottom.Size = new Size(38, 38);
+            btnScrollBottom.Font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold);
+            btnScrollBottom.TextColor = th.SubText;
+            btnScrollBottom.FillColor = th.Accent;
+            btnScrollBottom.BorderColor = th.Border;
+            btnScrollBottom.Visible = false;
+            btnScrollBottom.Click += delegate { ScrollToBottom(); };
+            main.Controls.Add(btnScrollBottom);
+            btnScrollBottom.BringToFront();
+
             composerBox = new BufferedPanel();
-            composerBox.SetBounds(26, 10, Math.Max(200, composerWrap.ClientSize.Width - 52), 64);
+            composerBox.SetBounds(26, 10, Math.Max(200, composerWrap.ClientSize.Width - 52), 124);
+            composerBox.BackColor = th.ComposerBg;
             composerWrap.Controls.Add(composerBox);
             composerBox.Paint += ComposerBox_Paint;
             composerBox.Resize += delegate { LayoutComposer(); };
@@ -365,25 +721,74 @@ namespace DsChat
             input.Multiline = true;
             input.BorderStyle = BorderStyle.None;
             input.Font = new Font("Microsoft YaHei UI", 10.5f);
-            input.BackColor = th.InputBg;
+            input.BackColor = th.ComposerBg;
             input.ForeColor = th.Text;
             input.ScrollBars = ScrollBars.None;
+            input.AllowDrop = true;
             input.KeyDown += Input_KeyDown;
-            input.TextChanged += delegate { RecalcComposerHeight(); };
+            input.TextChanged += delegate { RecalcComposerHeight(); UpdateMention(); };
+            input.GotFocus += delegate { if (composerBox != null) composerBox.Invalidate(); };
+            input.LostFocus += delegate
+            {
+                if (composerBox != null) composerBox.Invalidate();
+                if (!mentionVisible || mentionList == null) return;
+                Point p = mentionList.PointToClient(Cursor.Position);
+                if (!mentionList.ClientRectangle.Contains(p)) HideMention();
+            };
+            input.DragEnter += Input_DragEnter;
+            input.DragDrop += Input_DragDrop;
             composerBox.Controls.Add(input);
+            composerBox.AllowDrop = true;
+            composerBox.DragEnter += Input_DragEnter;
+            composerBox.DragDrop += Input_DragDrop;
 
-            btnSend = new PillButton();
-            btnSend.Text = "发送";
-            btnSend.Size = new Size(76, 38);
-            btnSend.Radius = 10;
-            btnSend.Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+            mentionList = new ListBox();
+            mentionList.DrawMode = DrawMode.OwnerDrawFixed;
+            mentionList.BorderStyle = BorderStyle.FixedSingle;
+            mentionList.Font = new Font("Microsoft YaHei UI", 9f);
+            mentionList.BackColor = th.InputBg;
+            mentionList.ForeColor = th.Text;
+            mentionList.Visible = false;
+            mentionList.IntegralHeight = false;
+            mentionList.DrawItem += MentionList_DrawItem;
+            mentionList.DoubleClick += delegate { AcceptMention(); };
+            main.Controls.Add(mentionList);
+            mentionList.BringToFront();
+
+            btnSend = new CircleButton();
+            btnSend.Size = new Size(40, 40);
+            btnSend.AccessibleName = "发送";
             btnSend.Click += delegate { OnSendClicked(); };
             composerBox.Controls.Add(btnSend);
 
+            lblModel = new Label();
+            lblModel.AutoSize = false;
+            lblModel.Height = Ui.Px(20);
+            lblModel.TextAlign = ContentAlignment.MiddleRight;
+            lblModel.AutoEllipsis = true;
+            lblModel.Font = new Font("Microsoft YaHei UI", 9f);
+            lblModel.ForeColor = th.SubText;
+            lblModel.BackColor = th.ComposerBg;
+            lblModel.Text = cfg.Model;
+            composerBox.Controls.Add(lblModel);
+
+            btnFiles = new PillButton();
+            btnFiles.Text = "\U0001F6E1  工作区";
+            btnFiles.Ghost = true;
+            btnFiles.Height = 30;
+            btnFiles.Width = 112;
+            btnFiles.Radius = 8;
+            btnFiles.Font = new Font("Microsoft YaHei UI", 9f);
+            btnFiles.Click += delegate { OpenWorkspace(); };
+            composerBox.Controls.Add(btnFiles);
+
             lblHint = new Label();
-            lblHint.Text = "Enter 发送 · Shift+Enter 换行 · Ctrl+N 新对话 · Ctrl+O 工作区 · Ctrl+T 主题 · Ctrl+, 设置";
+            lblHint.Text = "Enter 发送 · Shift+Enter 换行 · 右键消息操作 · Ctrl+N 新对话 · Ctrl+O 工作区 · Ctrl+, 设置";
             lblHint.Font = new Font("Microsoft YaHei UI", 8.5f);
-            lblHint.AutoSize = true;
+            lblHint.AutoSize = false;
+            lblHint.AutoEllipsis = true;
+            lblHint.TextAlign = ContentAlignment.MiddleLeft;
+            lblHint.Height = 20;
             lblHint.Location = new Point(30, 78);
             main.Controls.Add(lblHint);
 
@@ -417,8 +822,10 @@ namespace DsChat
                 int mh = main.ClientSize.Height;
                 header.SetBounds(0, 0, mw, headerH);
 
-                int boxW = Math.Max(Ui.Px(200), mw - Ui.Px(52));
-                int inputW = Math.Max(Ui.Px(80), boxW - btnSend.Width - Ui.Px(54));
+                int colX, colW;
+                MessageColumnFor(mw, out colX, out colW);
+                int boxW = Math.Max(Ui.Px(200), colW);
+                int inputW = Math.Max(Ui.Px(80), boxW - Ui.Px(36));
                 composerBoxH = MeasureComposerHeight(inputW);
 
                 // 提示行固定在窗口底部，不随输入框增高/降低而移动，避免闪烁
@@ -427,9 +834,21 @@ namespace DsChat
 
                 composerWrap.SetBounds(0, Math.Max(headerH, mh - composerH), mw, wrapH);
                 msgHost.SetBounds(0, headerH, mw, Math.Max(0, mh - headerH - composerH));
+                if (btnScrollBottom != null)
+                {
+                    int scx, scw;
+                    CurrentMessageColumn(out scx, out scw);
+                    int sbx = Math.Max(0, scx + scw - btnScrollBottom.Width - Ui.Px(22));
+                    int sby = Math.Max(0, msgHost.Bottom - btnScrollBottom.Height - Ui.Px(24));
+                    btnScrollBottom.Location = new Point(sbx, sby);
+                }
 
+                composerBox.Left = colX;
+                composerBox.Width = boxW;
                 composerBox.Top = Ui.Px(10);
                 composerBox.Height = composerBoxH;
+                lblHint.Left = colX;
+                lblHint.Width = colW;
                 lblHint.Top = composerWrap.Bottom + Ui.Px(4);
 
                 LayoutHeader();
@@ -438,11 +857,29 @@ namespace DsChat
             finally { ResumeLayout(true); }
         }
 
+        private void MessageColumnFor(int available, out int left, out int width)
+        {
+            int pad = Ui.Px(26);
+            int avail = Math.Max(Ui.Px(200), available);
+            int maxW = Math.Max(Ui.Px(200), avail - pad * 2);
+            int wanted = (int)Math.Round(avail * 0.75);
+            width = Math.Min(maxW, Math.Max(Ui.Px(240), wanted));
+            left = Math.Max(pad, (avail - width) / 2);
+        }
+
+        private void CurrentMessageColumn(out int left, out int width)
+        {
+            int avail = msgHost == null ? main.ClientSize.Width : msgHost.ClientSize.Width;
+            int scrollW = msgHost != null && msgHost.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0;
+            MessageColumnFor(Math.Max(Ui.Px(200), avail - scrollW), out left, out width);
+        }
+
         /// <summary>根据输入内容（含自动换行）计算发送框高度，限制在 1～约 10 行之间。</summary>
         private int MeasureComposerHeight(int inputWidth)
         {
-            int min = Ui.Px(64);
-            int max = Ui.Px(180);
+            // 输入框下面固定留出 60px：圆形发送按钮 + 当前模型文字
+            int min = Ui.Px(124);
+            int max = Ui.Px(240);
             if (input == null) return min;
 
             string t = input.Text == null ? "" : input.Text;
@@ -452,10 +889,180 @@ namespace DsChat
             Size sz = TextRenderer.MeasureText(t, input.Font,
                 new Size(Math.Max(Ui.Px(40), inputWidth - Ui.Px(6)), int.MaxValue),
                 TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
-            int h = sz.Height + Ui.Px(28);
+            int h = sz.Height + Ui.Px(82);
             if (h < min) h = min;
             if (h > max) h = max;
             return h;
+        }
+
+        private void MentionList_DrawItem(object sender, DrawItemEventArgs e)
+        {
+            if (e.Index < 0 || e.Index >= mentionList.Items.Count) return;
+            bool sel = (e.State & DrawItemState.Selected) != 0;
+            using (SolidBrush b = new SolidBrush(sel ? th.SidebarActive : th.InputBg))
+                e.Graphics.FillRectangle(b, e.Bounds);
+            TextRenderer.DrawText(e.Graphics, Convert.ToString(mentionList.Items[e.Index]), e.Font, e.Bounds,
+                th.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        }
+
+        private void HideMention()
+        {
+            if (mentionList == null) return;
+            mentionVisible = false;
+            mentionStart = -1;
+            mentionList.Visible = false;
+            mentionList.Items.Clear();
+        }
+
+        private void UpdateMention()
+        {
+            if (input == null || mentionList == null) return;
+            if (!Workspace.IsReady(cfg.Workspace)) { HideMention(); return; }
+
+            int caret = input.SelectionStart;
+            if (caret <= 0) { HideMention(); return; }
+            int at = input.Text.LastIndexOf('@', caret - 1);
+            if (at < 0) { HideMention(); return; }
+            string token = input.Text.Substring(at, caret - at);
+            if (token.IndexOfAny(new char[] { ' ', '\t', '\r', '\n' }) >= 0) { HideMention(); return; }
+
+            if (!mentionVisible) mentionPaths = GetWorkspaceFiles();
+            string q = token.Length > 1 ? token.Substring(1) : "";
+            mentionList.BeginUpdate();
+            mentionList.Items.Clear();
+            foreach (string p in mentionPaths)
+            {
+                if (q.Length == 0 || p.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0)
+                    mentionList.Items.Add(p);
+                if (mentionList.Items.Count >= 60) break;
+            }
+            mentionList.EndUpdate();
+
+            if (mentionList.Items.Count == 0) { HideMention(); return; }
+            mentionStart = at;
+            mentionVisible = true;
+            mentionList.SelectedIndex = 0;
+            mentionList.ItemHeight = Ui.Px(24);
+            PositionMention();
+            mentionList.Visible = true;
+            mentionList.BringToFront();
+        }
+
+        private void PositionMention()
+        {
+            int count = Math.Min(8, Math.Max(1, mentionList.Items.Count));
+            int h = count * Ui.Px(24) + Ui.Px(6);
+            int w = Math.Min(Ui.Px(520), Math.Max(Ui.Px(300), composerBox.Width - Ui.Px(80)));
+            Point local;
+            try
+            {
+                int pos = Math.Min(Math.Max(mentionStart, 0), Math.Max(0, input.TextLength - 1));
+                Point cp = input.GetPositionFromCharIndex(pos);
+                local = main.PointToClient(input.PointToScreen(cp));
+            }
+            catch { local = new Point(Ui.Px(26), msgHost.Bottom - Ui.Px(40)); }
+
+            int x = Math.Max(Ui.Px(8), Math.Min(local.X, main.ClientSize.Width - w - Ui.Px(8)));
+            int y = local.Y - h - Ui.Px(6);
+            if (y < Ui.Px(8)) y = local.Y + Ui.Px(26);
+            mentionList.SetBounds(x, y, w, h);
+        }
+
+        private List<string> GetWorkspaceFiles()
+        {
+            List<string> list = new List<string>();
+            try
+            {
+                string root = cfg.Workspace;
+                foreach (string f in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+                {
+                    string rel = Workspace.RelOf(root, f);
+                    string lower = rel.Replace('\\', '/');
+                    if (lower.IndexOf("/.git/", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    if (lower.StartsWith(".git/", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (lower.IndexOf("/node_modules/", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    if (lower.IndexOf("/bin/", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    if (lower.IndexOf("/obj/", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+                    list.Add(lower);
+                    if (list.Count >= 500) break;
+                }
+            }
+            catch { }
+            list.Sort(StringComparer.OrdinalIgnoreCase);
+            return list;
+        }
+
+        private void AcceptMention()
+        {
+            if (!mentionVisible || mentionList.SelectedIndex < 0) return;
+            string rel = Convert.ToString(mentionList.SelectedItem);
+            if (string.IsNullOrEmpty(rel)) { HideMention(); return; }
+            int start = mentionStart;
+            int end = input.SelectionStart;
+            HideMention();
+            string full = Workspace.Resolve(cfg.Workspace, rel);
+            string block = BuildFileBlock(rel, full);
+            if (start < 0 || end < start || end > input.TextLength) start = input.TextLength;
+            input.Text = input.Text.Substring(0, start) + block + input.Text.Substring(Math.Min(end, input.TextLength));
+            input.SelectionStart = start + block.Length;
+            input.Focus();
+        }
+
+        private void Input_DragEnter(object sender, DragEventArgs e)
+        {
+            if (e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy;
+        }
+
+        private void Input_DragDrop(object sender, DragEventArgs e)
+        {
+            if (e.Data == null || !e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+            string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
+            if (files == null) return;
+            foreach (string f in files)
+            {
+                string display = f;
+                try { if (Workspace.IsReady(cfg.Workspace) && f.StartsWith(Path.GetFullPath(cfg.Workspace), StringComparison.OrdinalIgnoreCase)) display = Workspace.RelOf(cfg.Workspace, f); }
+                catch { }
+                string block = BuildFileBlock(display, f);
+                int pos = input.SelectionStart;
+                input.Text = input.Text.Substring(0, pos) + block + input.Text.Substring(pos);
+                input.SelectionStart = pos + block.Length;
+            }
+            input.Focus();
+        }
+
+        private string BuildFileBlock(string display, string full)
+        {
+            string text = null;
+            try
+            {
+                if (OfficeFiles.IsOffice(full))
+                {
+                    string extracted;
+                    bool truncated;
+                    if (OfficeFiles.TryRead(full, out extracted, out truncated)) text = extracted;
+                }
+                else
+                {
+                    byte[] bytes = File.ReadAllBytes(full);
+                    if (bytes.Length > 512 * 1024) Array.Resize(ref bytes, 512 * 1024);
+                    text = DecodeText(bytes);
+                }
+            }
+            catch { }
+            if (text == null) text = "（无法读取这个文件，可能是二进制文件）";
+            if (text.Length > 12000) text = text.Substring(0, 12000) + "\r\n…（内容已截断）";
+            return "【引用文件：" + display + "】\r\n" + text + "\r\n【/引用文件】\r\n\r\n";
+        }
+
+        private static string DecodeText(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length == 0) return "";
+            for (int i = 0; i < Math.Min(bytes.Length, 4096); i++) if (bytes[i] == 0) return null;
+            int start = 0;
+            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) start = 3;
+            try { return new UTF8Encoding(false, true).GetString(bytes, start, bytes.Length - start); }
+            catch { try { return Encoding.GetEncoding(936).GetString(bytes); } catch { return Encoding.Default.GetString(bytes); } }
         }
 
         private void RecalcComposerHeight()
@@ -463,7 +1070,7 @@ namespace DsChat
             if (composerBox == null || main == null || btnSend == null) return;
             int mw = main.ClientSize.Width;
             int boxW = Math.Max(Ui.Px(200), mw - Ui.Px(52));
-            int inputW = Math.Max(Ui.Px(80), boxW - btnSend.Width - Ui.Px(54));
+            int inputW = Math.Max(Ui.Px(80), boxW - Ui.Px(36));
             if (MeasureComposerHeight(inputW) == composerBoxH) return;
 
             LayoutAll();
@@ -474,21 +1081,37 @@ namespace DsChat
         private void LayoutHeader()
         {
             if (lblStatus == null || header == null) return;
-            lblStatus.Location = new Point(Math.Max(Ui.Px(200), header.Width - lblStatus.Width - Ui.Px(28)), Ui.Px(19));
-            if (btnFiles != null)
-            {
-                int x = Math.Max(Ui.Px(200), lblStatus.Left - btnFiles.Width - Ui.Px(16));
-                btnFiles.Location = new Point(x, Ui.Px(11));
-            }
+            lblStatus.Location = new Point(Ui.Px(26), Ui.Px(18));
+            if (lblTokens != null)
+                lblTokens.Location = new Point(Math.Max(Ui.Px(200), header.Width - lblTokens.Width - Ui.Px(28)), Ui.Px(18));
         }
 
         private void LayoutComposer()
         {
             if (composerBox == null || composerWrap == null) return;
-            composerBox.Width = Math.Max(Ui.Px(200), composerWrap.ClientSize.Width - Ui.Px(52));
+            int colX, colW;
+            CurrentMessageColumn(out colX, out colW);
+            composerBox.Left = colX;
+            composerBox.Width = Math.Max(Ui.Px(200), colW);
             composerBox.Height = composerBoxH;
-            btnSend.Location = new Point(composerBox.Width - btnSend.Width - Ui.Px(12), composerBox.Height - btnSend.Height - Ui.Px(12));
-            input.SetBounds(Ui.Px(18), Ui.Px(14), Math.Max(Ui.Px(80), composerBox.Width - btnSend.Width - Ui.Px(54)), Math.Max(Ui.Px(20), composerBox.Height - Ui.Px(28)));
+
+            int pad = Ui.Px(12);
+            btnSend.Location = new Point(composerBox.Width - btnSend.Width - pad, composerBox.Height - btnSend.Height - pad);
+
+            int inputH = Math.Max(Ui.Px(20), composerBox.Height - Ui.Px(74));
+            input.SetBounds(Ui.Px(18), Ui.Px(14), Math.Max(Ui.Px(80), composerBox.Width - Ui.Px(36)), inputH);
+
+            btnFiles.SetBounds(Ui.Px(18),
+                btnSend.Top + Math.Max(0, (btnSend.Height - btnFiles.Height) / 2),
+                btnFiles.Width, btnFiles.Height);
+
+            int modelRight = btnSend.Left - Ui.Px(10);
+            int modelLeft = Math.Max(btnFiles.Right + Ui.Px(8), modelRight - Ui.Px(260));
+            int modelW = Math.Max(Ui.Px(60), modelRight - modelLeft);
+            lblModel.SetBounds(modelRight - modelW,
+                btnSend.Top + Math.Max(0, (btnSend.Height - lblModel.Height) / 2),
+                modelW, lblModel.Height);
+
             using (GraphicsPath p = Round.Path(new Rectangle(0, 0, composerBox.Width - 1, composerBox.Height - 1), Ui.Px(16)))
                 composerBox.Region = new Region(p);
         }
@@ -497,67 +1120,81 @@ namespace DsChat
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle r = new Rectangle(0, 0, composerBox.Width - 1, composerBox.Height - 1);
+            bool focused = input != null && input.Focused;
             using (GraphicsPath p = Round.Path(r, 16))
             {
-                using (SolidBrush b = new SolidBrush(th.InputBg)) e.Graphics.FillPath(b, p);
-                using (Pen pen = new Pen(th.Border, 1f)) e.Graphics.DrawPath(pen, p);
+                using (SolidBrush b = new SolidBrush(th.ComposerBg)) e.Graphics.FillPath(b, p);
+                using (Pen pen = new Pen(focused ? th.FocusBorder : th.ComposerBorder, focused ? 1.8f : 1f))
+                    e.Graphics.DrawPath(pen, p);
             }
         }
 
         // ================= 主题 =================
-        private void ToggleTheme()
-        {
-            cfg.Dark = !cfg.Dark;
-            th = Theme.Create(cfg.Dark);
-            ApplyThemeAll();
-            cfg.Save();
-        }
-
         private void ApplyThemeAll()
         {
             BackColor = th.Bg;
             sidebar.BackColor = th.Sidebar;
+            main.BackColor = th.Bg;
+            if (sessionList != null) sessionList.BackColor = th.Sidebar;
             header.BackColor = th.Bg;
             msgHost.BackColor = th.Bg;
-            input.BackColor = th.InputBg;
+            composerWrap.BackColor = th.Bg;
+            composerBox.BackColor = th.ComposerBg;
+            input.BackColor = th.ComposerBg;
             input.ForeColor = th.Text;
             lblHint.ForeColor = th.SubText;
-            lblModel.ForeColor = th.Text;
+            lblModel.ForeColor = th.SubText;
+            lblModel.BackColor = th.ComposerBg;
+            lblTokens.ForeColor = th.SubText;
             lblStatus.ForeColor = th.SubText;
+            if (mentionList != null)
+            {
+                mentionList.BackColor = th.InputBg;
+                mentionList.ForeColor = th.Text;
+            }
             foreach (Control c in sidebar.Controls)
             {
-                if (c is Label) ((Label)c).ForeColor = ((Label)c).Text == "deepseek" ? th.Text : th.SubText;
+                if (c is Label) ((Label)c).ForeColor = ((Label)c).Text == "Lumi" ? th.Text : th.SubText;
             }
             foreach (Control c in sessionList.Controls)
             {
                 SessionItem si = c as SessionItem;
                 if (si != null) si.ApplyTheme(th);
             }
-            foreach (Control c in header.Controls) if (c is Label) c.ForeColor = (c == lblModel) ? th.Text : th.SubText;
+            foreach (Control c in header.Controls)
+                if (c is Label && c != lblStatus && c != lblTokens) c.ForeColor = th.SubText;
 
+            if (logo != null) logo.Invalidate();
             btnNew.FillColor = th.Accent;
             btnNew.HoverColor = th.AccentHover;
+            btnNew.TextColor = th.AccentText;
             btnNew.Invalidate();
-            btnTheme.TextColor = th.SubText;
-            btnTheme.FillColor = th.Accent;
-            btnTheme.BorderColor = th.Border;
-            btnTheme.Invalidate();
             btnSettings.TextColor = th.SubText;
             btnSettings.FillColor = th.Accent;
             btnSettings.BorderColor = th.Border;
             btnSettings.Invalidate();
             btnFiles.TextColor = th.SubText;
             btnFiles.FillColor = th.Accent;
-            btnFiles.BorderColor = th.Border;
+            btnFiles.BorderColor = th.ComposerBorder;
             btnFiles.Invalidate();
+            if (btnScrollBottom != null)
+            {
+                btnScrollBottom.TextColor = th.SubText;
+                btnScrollBottom.FillColor = th.Accent;
+                btnScrollBottom.BorderColor = th.Border;
+                btnScrollBottom.Invalidate();
+            }
             btnSend.FillColor = th.Accent;
             btnSend.HoverColor = th.AccentHover;
+            btnSend.GlyphColor = th.AccentText;
             btnSend.Invalidate();
 
             foreach (MessageView v in views) v.ApplyTheme(th);
             LayoutMessages(false);
             composerBox.Invalidate();
             ApplyScrollbarTheme();
+            RebuildSessionList();
+            if (IsHandleCreated) Ui.ApplyTitleBarTheme(this, th.IsDark);
             Invalidate(true);
         }
 
@@ -575,38 +1212,130 @@ namespace DsChat
             SelectSession(active);
         }
 
+        private void AddSessionGroup(string text, ref int y)
+        {
+            Label g = new Label();
+            g.Text = text;
+            g.AutoSize = false;
+            g.Font = new Font("Microsoft YaHei UI", 8f);
+            g.ForeColor = th.SubText;
+            g.BackColor = th.Sidebar;
+            g.SetBounds(0, y, Math.Max(20, sessionList.ClientSize.Width - 2), Ui.Px(22));
+            g.TextAlign = ContentAlignment.MiddleLeft;
+            g.Padding = new Padding(Ui.Px(8), 0, 0, 0);
+            sessionList.Controls.Add(g);
+            y += Ui.Px(24);
+        }
+
         private void RebuildSessionList()
         {
+            if (sessionMenu != null) { sessionMenu.Close(); sessionMenu = null; }
             sessionList.SuspendLayout();
-            foreach (Control c in new List<Control>(GetSessionItems())) sessionList.Controls.Remove(c);
-            int y = 0;
+            List<Control> oldControls = new List<Control>();
+            foreach (Control c in sessionList.Controls) oldControls.Add(c);
+            foreach (Control c in oldControls)
+            {
+                sessionList.Controls.Remove(c);
+                c.Dispose();
+            }
+
+            List<int> order = new List<int>();
             for (int i = 0; i < sessions.Count; i++)
             {
+                order.Add(i);
+            }
+            order.Sort(delegate (int a, int b)
+            {
+                Session sa = sessions[a];
+                Session sb = sessions[b];
+                if (sa.Pinned != sb.Pinned) return sa.Pinned ? -1 : 1;
+                int c = sb.Updated.CompareTo(sa.Updated);
+                if (c != 0) return c;
+                return a.CompareTo(b);
+            });
+
+            DateTime today = DateTime.Today;
+            string lastGroup = null;
+            int y = 0;
+            foreach (int i in order)
+            {
+                Session s = sessions[i];
+                string group = s.Pinned ? "置顶" : (s.Updated.Date == today ? "今天" : (s.Updated.Date == today.AddDays(-1) ? "昨天" : "更早"));
+                if (group != lastGroup)
+                {
+                    AddSessionGroup(group, ref y);
+                    lastGroup = group;
+                }
+
                 SessionItem it = new SessionItem(th);
-                it.Title = sessions[i].Title;
+                it.Title = s.Title;
+                it.SessionIndex = i;
                 it.Selected = (i == active);
                 it.Width = sessionList.ClientSize.Width - 2;
                 it.Location = new Point(0, y);
                 it.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
                 int idx = i;
                 it.Click += delegate { SelectSession(idx); };
-                it.MouseUp += delegate (object s, MouseEventArgs me)
-                {
-                    if (me.Button == MouseButtons.Right)
-                    {
-                        ContextMenuStrip menu = new ContextMenuStrip();
-                        menu.Items.Add("删除该对话", null, delegate
-                        {
-                            if (MessageBox.Show(this, "确定删除该对话？", "删除对话", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-                                DeleteSession(idx);
-                        });
-                        menu.Show(it, me.Location);
-                    }
-                };
+                it.MenuClick += delegate { ShowSessionMenu(it, idx); };
                 sessionList.Controls.Add(it);
                 y += it.Height + 4;
             }
+            if (order.Count == 0)
+            {
+                Label empty = new Label();
+                empty.Text = "还没有历史对话";
+                empty.AutoSize = false;
+                empty.Font = new Font("Microsoft YaHei UI", 8.5f);
+                empty.ForeColor = th.SubText;
+                empty.BackColor = th.Sidebar;
+                empty.SetBounds(0, y, Math.Max(20, sessionList.ClientSize.Width - 2), Ui.Px(28));
+                empty.TextAlign = ContentAlignment.MiddleLeft;
+                empty.Padding = new Padding(Ui.Px(8), 0, 0, 0);
+                sessionList.Controls.Add(empty);
+            }
             sessionList.ResumeLayout();
+        }
+
+        private void ShowSessionMenu(SessionItem item, int idx)
+        {
+            if (streaming || idx < 0 || idx >= sessions.Count) return;
+            if (sessionMenu != null) { sessionMenu.Close(); sessionMenu = null; }
+
+            Session s = sessions[idx];
+            SessionMenu menu = new SessionMenu(th, s.Pinned,
+                delegate { RenameSession(idx); },
+                delegate { TogglePin(idx); },
+                delegate { DeleteSession(idx); });
+            sessionMenu = menu;
+            menu.FormClosed += delegate { if (sessionMenu == menu) sessionMenu = null; };
+
+            Point p = item.PointToScreen(new Point(item.Width - menu.Width - Ui.Px(4), item.Height + Ui.Px(4)));
+            Rectangle wa = Screen.FromControl(this).WorkingArea;
+            int x = Math.Max(wa.Left + 4, Math.Min(p.X, wa.Right - menu.Width - 4));
+            int y = Math.Max(wa.Top + 4, Math.Min(p.Y, wa.Bottom - menu.Height - 4));
+            menu.Location = new Point(x, y);
+            menu.Show(this);
+            menu.Activate();
+        }
+
+        private void RenameSession(int idx)
+        {
+            if (streaming || idx < 0 || idx >= sessions.Count) return;
+            Session s = sessions[idx];
+            string name = Prompt.Ask(this, th, "重命名对话", "输入新的会话名称", s.Title);
+            if (name == null || name.Length == 0) return;
+            s.Title = name;
+            RebuildSessionList();
+            SaveSessions();
+        }
+
+        private void TogglePin(int idx)
+        {
+            if (streaming || idx < 0 || idx >= sessions.Count) return;
+            Session s = sessions[idx];
+            s.Pinned = !s.Pinned;
+            RebuildSessionList();
+            SaveSessions();
         }
 
         private List<Control> GetSessionItems()
@@ -619,6 +1348,7 @@ namespace DsChat
         private void NewSession()
         {
             if (streaming) return;
+            editMessageIndex = -1;
             sessions.Add(new Session());
             active = sessions.Count - 1;
             RebuildSessionList();
@@ -630,9 +1360,11 @@ namespace DsChat
         private void DeleteSession(int idx)
         {
             if (streaming || idx < 0 || idx >= sessions.Count) return;
+            editMessageIndex = -1;
             sessions.RemoveAt(idx);
             if (sessions.Count == 0) sessions.Add(new Session());
-            active = Math.Min(active, sessions.Count - 1);
+            if (idx < active) active--;
+            else if (idx == active) active = Math.Min(active, sessions.Count - 1);
             if (active < 0) active = 0;
             RebuildSessionList();
             SelectSession(active);
@@ -643,28 +1375,34 @@ namespace DsChat
         {
             if (streaming) return;
             if (idx < 0 || idx >= sessions.Count) return;
+            editMessageIndex = -1;
+            if (messageMenu != null) { messageMenu.Close(); messageMenu = null; }
             active = idx;
             foreach (Control c in sessionList.Controls)
             {
                 SessionItem it = c as SessionItem;
                 if (it != null)
                 {
-                    it.Selected = (sessionList.Controls.GetChildIndex(it) == idx);
+                    it.Selected = (it.SessionIndex == idx);
                     it.Invalidate();
+                    if (it.Selected) sessionList.ScrollControlIntoView(it);
                 }
             }
             RenderSession();
             UpdateModelLabel();
+            lastInputTokens = sessions[active].LastInputTokens;
+            UpdateTokenLabel();
         }
 
         private void UpdateModelLabel()
         {
-            lblModel.Text = cfg.Model.Length == 0 ? "未设置模型" : cfg.Model;
-            LayoutHeader();
+            lblModel.Text = string.IsNullOrEmpty(cfg.Model) ? "未设置模型" : cfg.Model;
+            LayoutComposer();
         }
 
         private void RenderSession()
         {
+            if (messageMenu != null) { messageMenu.Close(); messageMenu = null; }
             msgHost.SuspendLayout();
             foreach (MessageView v in views) { msgHost.Controls.Remove(v); v.Dispose(); }
             views.Clear();
@@ -716,7 +1454,113 @@ namespace DsChat
             msgHost.Controls.Add(v);
             views.Add(v);
             v.Msg = m;
+            v.MenuRequested += delegate { ShowMessageMenu(v); };
+            v.HeightChanged += delegate { if (!layingOut) LayoutMessages(atBottom); };
             return v;
+        }
+
+        private void ShowMessageMenu(MessageView v)
+        {
+            if (v == null) return;
+            if (messageMenu != null) { messageMenu.Close(); messageMenu = null; }
+
+            List<string> labels = new List<string>();
+            List<Color> colors = new List<Color>();
+            List<Action> actions = new List<Action>();
+
+            labels.Add("复制文本");
+            colors.Add(th.Text);
+            actions.Add(delegate { CopyMessage(v); });
+
+            if (!v.IsToolCard && !streaming)
+            {
+                if (v.IsUser)
+                {
+                    labels.Add("编辑并重发");
+                    colors.Add(th.Text);
+                    actions.Add(delegate { EditMessage(v); });
+                }
+                else if (v.Msg != null && v.Msg.Role == "assistant")
+                {
+                    labels.Add("重新生成");
+                    colors.Add(th.Text);
+                    actions.Add(delegate { RegenerateMessage(v); });
+                }
+                labels.Add("从此处分支");
+                colors.Add(th.Text);
+                actions.Add(delegate { BranchFrom(v); });
+            }
+
+            ActionMenu menu = new ActionMenu(th, labels.ToArray(), colors.ToArray(), actions.ToArray());
+            messageMenu = menu;
+            menu.FormClosed += delegate { if (messageMenu == menu) messageMenu = null; };
+            Point p = Cursor.Position;
+            Rectangle wa = Screen.FromControl(this).WorkingArea;
+            int x = Math.Max(wa.Left + 4, Math.Min(p.X, wa.Right - menu.Width - 4));
+            int y = Math.Max(wa.Top + 4, Math.Min(p.Y, wa.Bottom - menu.Height - 4));
+            menu.Location = new Point(x, y);
+            menu.Show(this);
+            menu.Activate();
+        }
+
+        private void CopyMessage(MessageView v)
+        {
+            string t = v.GetText();
+            if (string.IsNullOrEmpty(t)) return;
+            try { Clipboard.SetText(t); SetStatus("● 已复制", true); }
+            catch { SetStatus("● 复制失败", false); }
+        }
+
+        private void EditMessage(MessageView v)
+        {
+            if (streaming) return;
+            Session s = sessions[active];
+            int mi = s.Messages.IndexOf(v.Msg);
+            if (mi < 0 || s.Messages[mi].Role != "user") return;
+            editMessageIndex = mi;
+            input.Text = v.Msg.Content == null ? "" : v.Msg.Content;
+            input.Focus();
+            input.SelectionStart = input.TextLength;
+            input.ScrollToCaret();
+            SetStatus("● 编辑后发送将替换原消息", true);
+        }
+
+        private void RegenerateMessage(MessageView v)
+        {
+            if (streaming) return;
+            Session s = sessions[active];
+            int mi = s.Messages.IndexOf(v.Msg);
+            if (mi < 0) return;
+            int ui = mi - 1;
+            while (ui >= 0 && s.Messages[ui].Role != "user") ui--;
+            if (ui < 0) return;
+
+            s.Messages.RemoveRange(ui + 1, s.Messages.Count - (ui + 1));
+            s.Updated = DateTime.Now;
+            ResetTurnState();
+            userWantsWrite = WantsFileWrite(s.Messages[ui].Content);
+            RenderSession();
+            StartRequest(true);
+        }
+
+        private void BranchFrom(MessageView v)
+        {
+            if (streaming) return;
+            Session s = sessions[active];
+            int mi = s.Messages.IndexOf(v.Msg);
+            if (mi < 0) return;
+
+            Session ns = new Session();
+            string t = s.Title == null ? "新对话" : s.Title;
+            ns.Title = (t.Length > 16 ? t.Substring(0, 16) : t) + " · 分支";
+            for (int i = 0; i <= mi; i++)
+                ns.Messages.Add(new ChatMsg(s.Messages[i].Role, s.Messages[i].Content));
+            sessions.Add(ns);
+            active = sessions.Count - 1;
+            editMessageIndex = -1;
+            RebuildSessionList();
+            SelectSession(active);
+            SaveSessions();
         }
 
         private void LayoutMessages(bool keepScroll)
@@ -732,15 +1576,15 @@ namespace DsChat
                 bool wasAtBottom = atBottom;
                 int oldScroll = Math.Max(0, -msgHost.AutoScrollPosition.Y);
 
-                int pad = Ui.Px(26);
-                int scrollW = msgHost.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0;
-                int maxW = Math.Max(Ui.Px(240), msgHost.ClientSize.Width - pad * 2 - scrollW);
+                int colX, colW;
+                CurrentMessageColumn(out colX, out colW);
+                int maxW = Math.Max(Ui.Px(240), colW);
 
                 int y = Ui.Px(18);
                 foreach (MessageView v in views)
                 {
                     int h = v.Reflow(maxW);
-                    int x = v.IsUser ? pad + Math.Max(0, maxW - v.Width) : pad;
+                    int x = v.IsUser ? colX + Math.Max(0, colW - v.Width) : colX;
                     Point loc = new Point(x, y - oldScroll);
                     if (v.Location != loc) v.Location = loc;
                     y += h + Ui.Px(18);
@@ -763,6 +1607,7 @@ namespace DsChat
                 if (target < 0) target = 0;
                 if (-msgHost.AutoScrollPosition.Y != target) msgHost.AutoScrollPosition = new Point(0, target);
                 atBottom = max <= 0 || target >= max - Ui.Px(48);
+                UpdateScrollButton();
             }
             finally { layingOut = false; }
         }
@@ -778,11 +1623,49 @@ namespace DsChat
             if (msgHost == null || !msgHost.IsHandleCreated) return;
             int max = Math.Max(0, msgHost.AutoScrollMinSize.Height - msgHost.ClientSize.Height);
             if (-msgHost.AutoScrollPosition.Y != max) msgHost.AutoScrollPosition = new Point(0, max);
+            UpdateScrollButton();
+        }
+
+        private void UpdateScrollButton()
+        {
+            if (btnScrollBottom == null) return;
+            bool show = !atBottom && views.Count > 0 && msgHost != null && msgHost.ClientSize.Height > 0;
+            if (btnScrollBottom.Visible != show) btnScrollBottom.Visible = show;
+            if (show) btnScrollBottom.BringToFront();
         }
 
         // ================= 发送 =================
         private void Input_KeyDown(object sender, KeyEventArgs e)
         {
+            if (mentionVisible)
+            {
+                if (e.KeyCode == Keys.Down)
+                {
+                    if (mentionList.Items.Count > 0)
+                        mentionList.SelectedIndex = Math.Min(mentionList.Items.Count - 1, mentionList.SelectedIndex + 1);
+                    e.SuppressKeyPress = true;
+                    return;
+                }
+                if (e.KeyCode == Keys.Up)
+                {
+                    if (mentionList.Items.Count > 0)
+                        mentionList.SelectedIndex = Math.Max(0, mentionList.SelectedIndex - 1);
+                    e.SuppressKeyPress = true;
+                    return;
+                }
+                if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Tab)
+                {
+                    AcceptMention();
+                    e.SuppressKeyPress = true;
+                    return;
+                }
+                if (e.KeyCode == Keys.Escape)
+                {
+                    HideMention();
+                    e.SuppressKeyPress = true;
+                    return;
+                }
+            }
             if (e.KeyCode == Keys.Enter && !e.Shift)
             {
                 e.SuppressKeyPress = true;
@@ -795,7 +1678,7 @@ namespace DsChat
             if (e.Control && e.KeyCode == Keys.N) { NewSession(); e.SuppressKeyPress = true; }
             else if (e.Control && e.KeyCode == Keys.O) { OpenWorkspace(); e.SuppressKeyPress = true; }
             else if (e.Control && e.KeyCode == Keys.Oemcomma) { OpenSettings(); e.SuppressKeyPress = true; }
-            else if (e.Control && e.KeyCode == Keys.T) { ToggleTheme(); e.SuppressKeyPress = true; }
+
         }
 
         private void OnSendClicked()
@@ -810,37 +1693,61 @@ namespace DsChat
             if (text.Length == 0) return;
 
             Session s = sessions[active];
+            if (editMessageIndex >= 0 && editMessageIndex < s.Messages.Count)
+            {
+                s.Messages.RemoveRange(editMessageIndex, s.Messages.Count - editMessageIndex);
+                editMessageIndex = -1;
+                RenderSession();
+            }
+            editMessageIndex = -1;
+
             ChatMsg userMsg = new ChatMsg("user", text);
             s.Messages.Add(userMsg);
+            s.Updated = DateTime.Now;
             if (s.Title == "新对话" || s.Title.Length == 0)
             {
                 string t = text.Replace("\r", " ").Replace("\n", " ");
                 s.Title = t.Length > 18 ? t.Substring(0, 18) + "…" : t;
-                RebuildSessionList();
             }
+            RebuildSessionList();
 
             input.Clear();
             AddView(userMsg, true);
             LayoutMessages(true);
             ScrollToBottom();
 
+            ResetTurnState();
+            userWantsWrite = WantsFileWrite(text);
+            StartRequest(true);
+        }
+
+        private void ResetTurnState()
+        {
             turnExtra.Clear();
+            toolCache.Clear();
             toolRounds = 0;
             summarizing = false;
             autoApproveThisTurn = false;
             approvedWritePaths.Clear();
             lastWriteSig = null;
             sameWriteRepeats = 0;
+            fileChangedThisTurn = false;
+            writeDeniedThisTurn = false;
+            autoNudgedThisTurn = false;
             userStopped = false;
-            StartRequest(true);
+            editMessageIndex = -1;
         }
 
         /// <summary>发起一轮请求（首轮和工具回填后都走这里）。</summary>
         private void StartRequest(bool allowTools)
         {
+            readyCheckSeq++;
+            int reqSeq = ++requestSeq;
             toolsAllowed = allowTools;
+            List<ChatMsg> payload = BuildPayload();
             ChatMsg botMsg = new ChatMsg("assistant", "");
             AddView(botMsg, false);
+            views[views.Count - 1].IsStreamingView = true;
             streamingIndex = views.Count - 1;
             ClearPending();
             revealed = 0;
@@ -865,6 +1772,7 @@ namespace DsChat
 
             cli.OnDelta += delegate (string d)
             {
+                if (reqSeq != requestSeq) return;
                 if (string.IsNullOrEmpty(d)) return;
                 lock (pendingLock) pending.Append(d);
             };
@@ -872,13 +1780,14 @@ namespace DsChat
             {
                 SafeInvoke(delegate
                 {
+                    if (reqSeq != requestSeq) return;
                     if (turnFinished) return;
                     turnFinished = true;
                     streaming = false;
                     networkDone = false;
                     int total = PendingLength();
                     if (revealed < total) revealed = total;
-                    FlushStream();
+                    FlushStream(true);
                     SetBusyUi(false);
                     string msg = err == null ? "未知错误" : err.Trim();
                     if (msg.Length > 600) msg = msg.Substring(0, 600) + "…";
@@ -894,6 +1803,7 @@ namespace DsChat
             {
                 SafeInvoke(delegate
                 {
+                    if (reqSeq != requestSeq) return;
                     if (turnFinished) return;
                     networkDone = true;
 
@@ -911,21 +1821,35 @@ namespace DsChat
                         else StartFinalSummary("工具调用次数已经达到 " + MaxToolRounds + " 轮上限");
                         return;
                     }
+                    if (ShouldNudgeWrite())
+                    {
+                        StartWriteNudge();
+                        return;
+                    }
                     if (revealed >= PendingLength()) FinishTurn();
                     // 否则等打字机把剩余文字显示完，再由 StreamTick 调 FinishTurn
                 });
             };
 
-            cli.Send(BuildPayload());
+            cli.Send(payload);
         }
 
+        /// <summary>
+        /// 组装请求：按上下文预算裁掉较早的消息、压缩旧工具结果，而不是固定只发最近 20 条。
+        /// 这样既能把 token 压下来，也不会因为某几条消息特别长而爆上下文。
+        /// </summary>
         private List<ChatMsg> BuildPayload()
         {
             Session s = sessions[active];
-            List<ChatMsg> payload = new List<ChatMsg>();
-            int start = Math.Max(0, s.Messages.Count - 20);
-            for (int i = start; i < s.Messages.Count; i++) payload.Add(s.Messages[i]);
-            payload.AddRange(turnExtra);
+            List<ChatMsg> payload = ContextBudget.Build(s.Messages, turnExtra, cfg.ContextTokens);
+
+            int tokens = ContextBudget.EstimateMessages(payload);
+            string sys = ChatClient.ComposeSystemPrompt(cfg);
+            if (sys.Length > 0) tokens += ContextBudget.EstimateTokens(sys) + 4;
+            if (toolsAllowed && cfg.EnableTools && Workspace.IsReady(cfg.Workspace)) tokens += 260;
+            lastInputTokens = tokens;
+            s.LastInputTokens = tokens;
+            UpdateTokenLabel();
             return payload;
         }
 
@@ -939,23 +1863,31 @@ namespace DsChat
             Session s = sessions[active];
             SetBusyUi(false);
             if (revealed < PendingLength()) revealed = PendingLength();
-            FlushStream();
+            FlushStream(true);
+            if (streamingIndex >= 0 && streamingIndex < views.Count) views[streamingIndex].FinishStreaming();
             string content = PendingText();
+
+            // 兜底：没有实际写入成功，却仍然声称已写入时，不用假成功覆盖用户判断
+            if (!fileChangedThisTurn && userWantsWrite && LooksLikeWriteClaim(content))
+            {
+                if (writeDeniedThisTurn)
+                    content = "（写入被拒绝，文件没有修改。）";
+                else if (autoNudgedThisTurn)
+                    content = "（自动重试后仍未检测到实际的 write_file 调用，文件可能没有写入成功。请检查工作区路径和权限，或再明确要求“调用 write_file 写入 <文件名>”。）";
+            }
+
             if (content.Trim().Length == 0)
             {
-                if (userStopped)
+                if (userStopped || (toolRounds > 0 && !summarizing))
                 {
+                    // 工具轮次已经产生了可见的工具消息，这里不再追加一段空结果提示
                     RemoveStreamingView();
                 }
                 else
                 {
-                    string hint;
-                    if (summarizing)
-                        hint = "（工具调用已达上限，模型仍未返回文字总结；可以缩小任务范围，或者分多次让我处理）";
-                    else if (toolRounds > 0)
-                        hint = "（本轮进行了 " + toolRounds + " 轮工具调用，模型没有返回文字结果；已停止工具循环，建议缩小任务范围后重试）";
-                    else
-                        hint = "（没有收到内容，请检查接口路径、模型名称或代理设置）";
+                    string hint = summarizing
+                        ? "（工具调用已达上限，模型仍未返回文字总结；可以缩小任务范围，或者分多次让我处理）"
+                        : "（没有收到内容，请检查接口路径、模型名称或代理设置）";
                     MessageView ev = AddView(new ChatMsg("assistant", hint), false);
                     ev.SetError();
                 }
@@ -963,15 +1895,18 @@ namespace DsChat
             else
             {
                 s.Messages.Add(new ChatMsg("assistant", content));
+                s.Updated = DateTime.Now;
             }
             ClearPending();
             revealed = 0;
             revealCarry = 0;
             turnExtra.Clear();
+            toolCache.Clear();
             LayoutMessages(true);
             ScrollToBottom();
             SetStatus(userStopped ? "● 已停止" : "● 已连接", !userStopped);
             SaveSessions();
+            RebuildSessionList();
             client = null;
         }
 
@@ -1014,12 +1949,15 @@ namespace DsChat
             foreach (ToolCall tc in calls)
             {
                 string summary;
-                string result = ExecuteTool(tc, out summary);
+                string diff;
+                Stopwatch sw = Stopwatch.StartNew();
+                string result = ExecuteTool(tc, out summary, out diff);
+                sw.Stop();
                 ChatMsg tool = new ChatMsg("tool", result);
                 tool.ToolCallId = tc.Id;
                 turnExtra.Add(tool);
                 MessageView v = AddView(new ChatMsg("assistant", summary), false);
-                v.SetTool();
+                v.SetToolCard(tc.Name, summary, tc.Arguments, result, diff, sw.ElapsedMilliseconds);
             }
 
             LayoutMessages(true);
@@ -1049,6 +1987,98 @@ namespace DsChat
             SetStatus("● 工具调用已停止，正在生成总结…", false);
         }
 
+        /// <summary>模型声称写好了文件，但本轮没有实际写入成功时，自动补一轮“真正调用工具”。</summary>
+        private bool ShouldNudgeWrite()
+        {
+            if (!toolsAllowed || !cfg.EnableTools || !userWantsWrite) return false;
+            if (fileChangedThisTurn || writeDeniedThisTurn || autoNudgedThisTurn) return false;
+            return LooksLikeWriteClaim(PendingText());
+        }
+
+        private void StartWriteNudge()
+        {
+            autoNudgedThisTurn = true;
+            string partial = PendingText();
+            if (partial.Trim().Length == 0)
+            {
+                FinishTurn();
+                return;
+            }
+
+            RemoveStreamingView();
+            ClearPending();
+            revealed = 0;
+            revealCarry = 0;
+            networkDone = false;
+
+            turnExtra.Add(new ChatMsg("assistant", partial));
+            turnExtra.Add(new ChatMsg("user",
+                "你刚才只回复了文字，没有实际调用 write_file，文件并没有写入。请立刻调用 write_file 写入完整内容；调用成功后再根据工具结果回答。"));
+            StartRequest(true);
+            SetStatus("● 检测到未实际写入，正在自动重试…", false);
+        }
+
+        private static bool WantsFileWrite(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            string[] verbs = new string[]
+            {
+                "写入", "写到", "写进", "保存到", "保存为", "保存成",
+                "创建文件", "新建文件", "生成文件", "生成一个文件", "修改文件",
+                "覆盖", "导出到", "输出到", "写一个文件", "写个文件"
+            };
+            foreach (string v in verbs) if (text.IndexOf(v, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+
+            string lower = text.ToLowerInvariant();
+            string[] exts = new string[]
+            {
+                ".txt", ".md", ".py", ".c", ".h", ".cpp", ".cs", ".xlsx", ".docx",
+                ".json", ".csv", ".log", ".ini", ".html", ".js", ".ts", ".java"
+            };
+            foreach (string ext in exts)
+            {
+                int idx = lower.IndexOf(ext, StringComparison.Ordinal);
+                while (idx >= 0)
+                {
+                    int after = idx + ext.Length;
+                    if (after >= lower.Length || !IsAsciiLetterOrDigit(lower[after])) return true;
+                    idx = lower.IndexOf(ext, idx + 1, StringComparison.Ordinal);
+                }
+            }
+            return false;
+        }
+
+        private static bool IsAsciiLetterOrDigit(char ch)
+        {
+            return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+        }
+
+        private static bool LooksLikeWriteClaim(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            string[] claims = new string[]
+            {
+                "已写入", "已经写入", "已保存", "已经保存", "已创建", "已经创建",
+                "已生成", "已经生成", "已修改", "已经修改", "已更新", "已经更新",
+                "写入成功", "保存成功", "已完成写入"
+            };
+            foreach (string c in claims) if (text.IndexOf(c, StringComparison.Ordinal) >= 0) return true;
+            return false;
+        }
+
+        private static bool ArgExists(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json)) return false;
+            try
+            {
+                System.Web.Script.Serialization.JavaScriptSerializer js = new System.Web.Script.Serialization.JavaScriptSerializer();
+                Dictionary<string, object> d = js.DeserializeObject(json) as Dictionary<string, object>;
+                object value;
+                return d != null && d.TryGetValue(key, out value) && value != null;
+            }
+            catch { return false; }
+        }
+
         private static bool IsWriteOnly(List<ToolCall> calls)
         {
             if (calls == null || calls.Count == 0) return false;
@@ -1068,9 +2098,10 @@ namespace DsChat
             return sb.ToString();
         }
 
-        private string ExecuteTool(ToolCall tc, out string summary)
+        private string ExecuteTool(ToolCall tc, out string summary, out string diff)
         {
-            summary = "🔧 调用工具：" + tc.Name;
+            summary = "• 调用工具：" + tc.Name;
+            diff = "";
             try
             {
                 string name = tc.Name == null ? "" : tc.Name.Trim();
@@ -1078,28 +2109,69 @@ namespace DsChat
                 {
                     string sub = ArgOf(tc.Arguments, "subdir");
                     string text = Workspace.ListFiles(cfg.Workspace, sub);
-                    summary = "🔧 列出工作区" + (string.IsNullOrEmpty(sub) ? "" : " / " + sub);
+                    summary = "• 列出工作区" + (string.IsNullOrEmpty(sub) ? "" : " / " + sub);
                     return text;
                 }
                 if (name == "read_file")
                 {
                     string rel = ArgOf(tc.Arguments, "path");
-                    string text = Workspace.ReadText(cfg.Workspace, rel);
-                    summary = "🔧 读取 " + rel + "（" + Workspace.FormatSize(text.Length) + "）";
+                    int start = ArgInt(tc.Arguments, "start_line", 1);
+                    int maxLines = ArgInt(tc.Arguments, "max_lines", Workspace.DefaultReadLines);
+
+                    string cacheKey = ToolCacheKey(tc, rel);
+                    if (cacheKey != null && toolCache.ContainsKey(cacheKey))
+                    {
+                        string old = toolCache[cacheKey];
+                        summary = "• 读取 " + rel + "（与上次相同，已省略）";
+                        if (old.Length <= 300) return old;
+                        return "该文件与上次读取时完全一致，结果已省略（" + old.Length + " 字符）。如需重新查看，请说明。";
+                    }
+
+                    int first, last, total;
+                    string text = Workspace.ReadTextPage(cfg.Workspace, rel, start, maxLines, out first, out last, out total);
+                    if (cacheKey != null) toolCache[cacheKey] = text;
+                    summary = "• 读取 " + rel + "（第 " + first + (last > first ? "-" + last : "") + " 行 / 共 " + total + " 行）";
                     return text;
                 }
                 if (name == "write_file")
                 {
                     string rel = ArgOf(tc.Arguments, "path");
+                    if (!ArgExists(tc.Arguments, "content"))
+                        return "写入失败：工具参数缺少 content。请提供完整文件内容后重新调用 write_file。";
                     string content = ArgOf(tc.Arguments, "content");
                     if (Workspace.SameText(cfg.Workspace, rel, content))
                     {
-                        summary = "🔧 内容未变化，跳过写入 " + rel;
+                        fileChangedThisTurn = true;
+                        summary = "• 内容未变化，跳过写入 " + rel;
                         return "文件内容与请求完全相同，无需重复写入：" + rel;
                     }
-                    if (cfg.ConfirmWrites && !ConfirmWrite(rel, content)) return "用户拒绝了这次写入，请不要重复尝试。";
+
+                    string oldText = "";
+                    if (!OfficeFiles.IsOffice(rel))
+                    {
+                        try { if (Workspace.Exists(cfg.Workspace, rel) && !Directory.Exists(Workspace.Resolve(cfg.Workspace, rel))) oldText = Workspace.ReadText(cfg.Workspace, rel); }
+                        catch { oldText = ""; }
+                        diff = LineDiff.Build(oldText, content);
+                    }
+
+                    if (cfg.ConfirmWrites && !ConfirmWrite(rel, diff, content))
+                    {
+                        writeDeniedThisTurn = true;
+                        return "用户拒绝了这次写入，请不要重复尝试。";
+                    }
                     int n = Workspace.WriteText(cfg.Workspace, rel, content);
-                    summary = "🔧 写入 " + rel + "（" + n + " 字符）";
+                    fileChangedThisTurn = true;
+                    if (OfficeFiles.IsWorkbook(rel))
+                    {
+                        summary = "• 写入 " + rel + "（表格）";
+                        return "写入成功：" + rel + "（已生成 .xlsx，内容按 CSV/TSV/表格解析）。";
+                    }
+                    if (OfficeFiles.IsDocument(rel))
+                    {
+                        summary = "• 写入 " + rel + "（文档）";
+                        return "写入成功：" + rel + "（已生成 .docx，按文本段落写入）。";
+                    }
+                    summary = "• 写入 " + rel + "（" + n + " 字符）";
                     return "写入成功：" + rel + "，" + n + " 个字符。";
                 }
                 if (name == "delete_file")
@@ -1107,27 +2179,34 @@ namespace DsChat
                     string rel = ArgOf(tc.Arguments, "path");
                     string full = Workspace.Resolve(cfg.Workspace, rel);
                     if (!File.Exists(full) && !Directory.Exists(full)) return "文件或目录本来就不存在，无需删除：" + rel;
-                    if (cfg.ConfirmWrites && !ConfirmDelete(rel)) return "用户拒绝了这次删除，请不要重复尝试。";
+                    if (cfg.ConfirmWrites && !ConfirmDelete(rel))
+                    {
+                        writeDeniedThisTurn = true;
+                        return "用户拒绝了这次删除，请不要重复尝试。";
+                    }
                     Workspace.Delete(cfg.Workspace, rel);
-                    summary = "🔧 删除 " + rel;
+                    fileChangedThisTurn = true;
+                    summary = "• 删除 " + rel;
                     return "已删除：" + rel;
                 }
                 return "未知工具：" + name;
             }
             catch (Exception ex)
             {
-                summary = "⚠ 工具执行失败：" + tc.Name;
+                summary = "• 工具执行失败：" + tc.Name;
                 return "执行失败：" + ex.Message;
             }
         }
 
-        private bool ConfirmWrite(string rel, string content)
+        private bool ConfirmWrite(string rel, string diff, string content)
         {
             if (autoApproveThisTurn) return true;
             string key = WriteKey(rel);
             if (approvedWritePaths.Contains(key)) return true;
 
-            ConfirmChoice c = Confirm.AskWrite(this, th, rel, content);
+            bool diffMode = !string.IsNullOrEmpty(diff);
+            string detail = diffMode ? diff : content;
+            ConfirmChoice c = Confirm.AskWrite(this, th, rel, detail, diffMode);
             if (c == ConfirmChoice.AllowTurn) autoApproveThisTurn = true;
             else if (c == ConfirmChoice.Allow) approvedWritePaths.Add(key);
             return c != ConfirmChoice.Deny;
@@ -1145,6 +2224,30 @@ namespace DsChat
             ConfirmChoice c = Confirm.AskDelete(this, th, rel);
             if (c == ConfirmChoice.AllowTurn) autoApproveThisTurn = true;
             return c != ConfirmChoice.Deny;
+        }
+
+        /// <summary>读取文件的去重键：路径 + 参数 + 文件长度/修改时间；文件变了就不会命中旧结果。</summary>
+        private string ToolCacheKey(ToolCall tc, string rel)
+        {
+            if (tc == null || string.IsNullOrEmpty(rel)) return null;
+            try
+            {
+                string full = Workspace.Resolve(cfg.Workspace, rel);
+                if (File.Exists(full))
+                {
+                    FileInfo fi = new FileInfo(full);
+                    return "read\u0001" + (tc.Arguments == null ? "" : tc.Arguments)
+                         + "\u0001" + fi.Length + "\u0001" + fi.LastWriteTimeUtc.Ticks;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static int ArgInt(string json, string key, int def)
+        {
+            int v;
+            return int.TryParse(ArgOf(json, key), out v) ? v : def;
         }
 
         /// <summary>从工具调用的 JSON 参数里取字符串字段。</summary>
@@ -1167,11 +2270,17 @@ namespace DsChat
 
         private void StopStreaming()
         {
+            if (!streaming && turnFinished) return;
             userStopped = true;
-            if (client != null) client.Cancel();
-            SetBusyUi(false);
-            streaming = false;
-            SetStatus("● 已停止", false);
+            requestSeq++; // 让旧请求的 OnDelta/OnDone 全部失效
+            ChatClient c = client;
+            client = null;
+            if (c != null) { try { c.Cancel(); } catch { } }
+
+            if (turnFinished) { SetBusyUi(false); SetStatus("● 已停止", false); return; }
+            int total = PendingLength();
+            if (revealed < total) revealed = total;
+            FinishTurn();
         }
 
         private void RemoveStreamingView()
@@ -1246,15 +2355,22 @@ namespace DsChat
 
         private void FlushStream()
         {
+            FlushStream(false);
+        }
+
+        private void FlushStream(bool forceFull)
+        {
             if (streamingIndex < 0 || streamingIndex >= views.Count) return;
             MessageView v = views[streamingIndex];
-            v.SetText(PendingText(revealed));
+            string full = PendingText(revealed);
+            if (forceFull) v.SetText(full, true);
+            else v.SetStreamText(full);
             LayoutMessages(atBottom);
         }
 
         private void SetBusyUi(bool busy)
         {
-            btnSend.Text = busy ? "停止" : "发送";
+            btnSend.IsStop = busy;
             btnSend.FillColor = busy ? th.Danger : th.Accent;
             btnSend.HoverColor = busy ? Color.FromArgb(220, 90, 90) : th.AccentHover;
             btnSend.Invalidate();
@@ -1266,15 +2382,47 @@ namespace DsChat
         {
             lblStatus.Text = text;
             Color c = ok ? Color.FromArgb(46, 180, 120) : th.SubText;
-            if (!ok && text.Contains("失败")) c = th.Danger;
+            if (!ok && (text.Contains("失败") || text.Contains("无效") || text.Contains("错误"))) c = th.Danger;
             lblStatus.ForeColor = c;
             LayoutHeader();
         }
 
         private void UpdateStatusIdle()
         {
-            if (cfg.ApiKey.Length == 0) SetStatus("● 未配置 Key", false);
+            if (string.IsNullOrEmpty(cfg.BaseUrl)) SetStatus("● 未配置接口", false);
+            else if (string.IsNullOrEmpty(cfg.ApiKey)) SetStatus("● 未配置 Key", false);
             else SetStatus("● 就绪", true);
+        }
+
+        private void UpdateTokenLabel()
+        {
+            if (lblTokens == null) return;
+            lblTokens.Text = lastInputTokens > 0
+                ? "Token ≈ " + ContextBudget.FormatTokens(lastInputTokens)
+                : "Token ≈ —";
+            lblTokens.ForeColor = th.SubText;
+            LayoutHeader();
+        }
+
+        private int readyCheckSeq;
+        private void StartReadyCheck()
+        {
+            if (streaming) return;
+            if (string.IsNullOrEmpty(cfg.BaseUrl)) { SetStatus("● 未配置接口", false); return; }
+            if (string.IsNullOrEmpty(cfg.ApiKey)) { SetStatus("● 未配置 Key", false); return; }
+
+            int seq = ++readyCheckSeq;
+            SetStatus("● 检查中…", false);
+            Config snapshot = cfg.Clone();
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                string state = ChatClient.CheckConnection(snapshot);
+                SafeInvoke(delegate
+                {
+                    if (seq != readyCheckSeq || streaming) return;
+                    SetStatus("● " + state, state == "就绪");
+                });
+            });
         }
 
         private void SafeInvoke(MethodInvoker a)
@@ -1293,10 +2441,11 @@ namespace DsChat
                 {
                     cfg = f.Result;
                     cfg.Save();
-                    th = Theme.Create(cfg.Dark);
+                    th = Theme.Create(Theme.ResolveDark(cfg.ThemeMode));
                     ApplyThemeAll();
                     UpdateModelLabel();
                     UpdateStatusIdle();
+                    StartReadyCheck();
                 }
             }
         }
@@ -1358,8 +2507,20 @@ namespace DsChat
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            try { if (themeWatch != null) { themeWatch.Stop(); themeWatch.Dispose(); themeWatch = null; } } catch { }
+            try { if (tick != null) { tick.Stop(); tick.Dispose(); tick = null; } } catch { }
             try { Application.RemoveMessageFilter(this); } catch { }
             base.OnFormClosed(e);
+        }
+
+        private void CheckSystemTheme()
+        {
+            if (cfg.ThemeMode != Theme.ModeSystem) return;
+            bool dark = Theme.IsSystemDark();
+            if (dark == th.IsDark) return;
+            th = Theme.Create(dark);
+            ApplyThemeAll();
+            if (!streaming) UpdateStatusIdle();
         }
     }
 
@@ -1373,7 +2534,13 @@ namespace DsChat
                 StringBuilder sb = new StringBuilder();
                 foreach (Session s in sessions)
                 {
-                    sb.Append("B\t").Append(B64(s.Title)).Append('\n');
+                    sb.Append("B\t").Append(B64(s.Title))
+                      .Append('\t').Append(s.Pinned ? "1" : "0")
+                      .Append('\t').Append(s.Created.Ticks.ToString())
+                      .Append('\t').Append(s.Updated.Ticks.ToString())
+                      .Append('\n');
+                    if (s.LastInputTokens > 0)
+                        sb.Append("T\t").Append(s.LastInputTokens).Append('\n');
                     foreach (ChatMsg m in s.Messages)
                         sb.Append("M\t").Append(m.Role).Append('\t').Append(B64(m.Content)).Append('\n');
                 }
@@ -1395,8 +2562,21 @@ namespace DsChat
                     if (line.StartsWith("B\t"))
                     {
                         cur = new Session();
-                        cur.Title = UnB64(line.Substring(2));
+                        cur.Title = UnB64(line.Substring(2).Split('\t')[0]);
+                        string[] bp = line.Substring(2).Split('\t');
+                        if (bp.Length >= 4)
+                        {
+                            cur.Pinned = bp[1] == "1";
+                            long ticks;
+                            if (long.TryParse(bp[2], out ticks)) { try { cur.Created = new DateTime(ticks); } catch { } }
+                            if (long.TryParse(bp[3], out ticks)) { try { cur.Updated = new DateTime(ticks); } catch { } }
+                        }
                         list.Add(cur);
+                    }
+                    else if (line.StartsWith("T\t") && cur != null)
+                    {
+                        int n;
+                        if (int.TryParse(line.Substring(2), out n)) cur.LastInputTokens = n;
                     }
                     else if (line.StartsWith("M\t") && cur != null)
                     {

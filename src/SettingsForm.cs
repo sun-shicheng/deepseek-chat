@@ -11,10 +11,11 @@ namespace DsChat
         private Config cfg;
 
         private TextBox tBase, tPath, tKey, tModel, tProxy, tProxyUser, tProxyPass, tSystem;
-        private NumericUpDown nTimeout, nTemp, nMaxTokens;
-        private CheckBox cStream, cIgnoreCert, cShowKey, cTrust;
+        private NumericUpDown nTimeout, nTemp, nMaxTokens, nContext;
+        private CheckBox cStream, cIgnoreCert, cShowKey, cTrust, cConcise;
+        private ComboBox cbTheme;
         private Label lblStatus;
-        private Button btnTest, btnSave, btnCancel;
+        private RoundedButton btnTest, btnSave, btnCancel;
         private bool testing;
 
         public Config Result;
@@ -44,6 +45,12 @@ namespace DsChat
             if (Math.Abs(Ui.S - 1f) > 0.01f) Scale(new SizeF(Ui.S, Ui.S));
             LoadValues();
             ApplyTheme();
+
+            cbTheme.SelectedIndexChanged += delegate
+            {
+                th = Theme.Create(Theme.ResolveDark(cbTheme.SelectedIndex));
+                ApplyTheme();
+            };
         }
 
         private void BuildUi()
@@ -60,6 +67,23 @@ namespace DsChat
             title.AutoSize = true;
             title.Location = new Point(x, y);
             Controls.Add(title);
+
+            Label lTheme = new Label();
+            lTheme.Text = "主题";
+            lTheme.AutoSize = true;
+            lTheme.Location = new Point(ClientSize.Width - 190, y + 4);
+            Controls.Add(lTheme);
+
+            cbTheme = new ComboBox();
+            cbTheme.DropDownStyle = ComboBoxStyle.DropDownList;
+            cbTheme.FlatStyle = FlatStyle.Flat;
+            cbTheme.DrawMode = DrawMode.OwnerDrawFixed;
+            cbTheme.ItemHeight = Ui.Px(22);
+            cbTheme.DrawItem += ComboTheme_DrawItem;
+            cbTheme.Items.AddRange(new object[] { "跟随系统", "浅色", "深色" });
+            cbTheme.Location = new Point(ClientSize.Width - 150, y - 1);
+            cbTheme.Size = new Size(124, 26);
+            Controls.Add(cbTheme);
             y += 46;
 
             Label sub = new Label();
@@ -73,7 +97,7 @@ namespace DsChat
             // 接口地址
             AddLabel("接口地址", x, y); y += 20;
             tBase = AddBox(x, y, w); y += 30;
-            AddHint("例如 https://api.deepseek.com 或 http://10.0.0.5:8000", x, y); y += 24;
+            AddHint("例如 https://api.openai.com 或 http://10.0.0.5:8000", x, y); y += 24;
 
             // 路径 + 模型（左右两列）
             AddLabel("接口路径", x, y);
@@ -83,7 +107,7 @@ namespace DsChat
             tModel = AddBox(x2, y, colW);
             y += 30;
             AddHint("默认 /v1/chat/completions，可填完整 URL", x, y);
-            AddHint("例如 deepseek-chat", x2, y);
+            AddHint("例如 gpt-4o-mini、qwen2.5-72b-instruct", x2, y);
             y += 24;
 
             // API Key
@@ -123,9 +147,11 @@ namespace DsChat
             y += 56;
 
             // 数字参数
-            nTimeout = AddNumber("超时（秒）", x, y, 90, 10, 600, 120, 1);
-            nTemp = AddNumber("温度", x + 120, y, 90, 0, 2, 0.7m, 0.1m);
-            nMaxTokens = AddNumber("最大 token（0=默认）", x + 260, y, 120, 0, 32000, 0, 100);
+            nTimeout = AddNumber("超时（秒）", x, y, 80, 10, 600, 120, 1);
+            nTemp = AddNumber("温度", x + 100, y, 70, 0, 2, 0.7m, 0.1m);
+            nMaxTokens = AddNumber("最大 token（0=默认）", x + 190, y, 90, 0, 32000, 0, 100);
+            AddLabel("上下文 token（0=不限）", x + 370, y);
+            nContext = AddNumberBox(x + 370, y + 22, 110, 0, 64000, 12000, 1000);
             y += 52;
 
             cStream = new CheckBox();
@@ -142,33 +168,45 @@ namespace DsChat
             y += 30;
 
             cTrust = new CheckBox();
-            cTrust.Text = "忽略系统代理与环境变量代理（内网直连，等价 trust_env=False）";
+            cTrust.Text = "忽略系统/环境代理（内网直连）";
             cTrust.AutoSize = true;
             cTrust.Location = new Point(x, y);
             Controls.Add(cTrust);
+
+            cConcise = new CheckBox();
+            cConcise.Text = "简洁回答（省输出 token）";
+            cConcise.AutoSize = true;
+            cConcise.Location = new Point(x + 240, y);
+            Controls.Add(cConcise);
             y += 30;
 
-            btnTest = new Button();
+            btnTest = new RoundedButton();
             btnTest.Text = "测试连接";
             btnTest.Size = new Size(100, 32);
             btnTest.Location = new Point(x, y);
-            btnTest.FlatStyle = FlatStyle.Flat;
+            btnTest.BackColor = th.InputBg;
+            btnTest.ForeColor = th.Text;
+            btnTest.BorderColor = th.Border;
             btnTest.Click += delegate { DoTest(); };
             Controls.Add(btnTest);
 
-            btnSave = new Button();
+            btnSave = new RoundedButton();
             btnSave.Text = "保存";
             btnSave.Size = new Size(96, 32);
             btnSave.Location = new Point(ClientSize.Width - x - 96 - 104, y);
-            btnSave.FlatStyle = FlatStyle.Flat;
+            btnSave.BackColor = th.Accent;
+            btnSave.ForeColor = th.AccentText;
+            btnSave.BorderColor = th.Accent;
             btnSave.Click += delegate { SaveAndClose(); };
             Controls.Add(btnSave);
 
-            btnCancel = new Button();
+            btnCancel = new RoundedButton();
             btnCancel.Text = "取消";
             btnCancel.Size = new Size(96, 32);
             btnCancel.Location = new Point(ClientSize.Width - x - 96, y);
-            btnCancel.FlatStyle = FlatStyle.Flat;
+            btnCancel.BackColor = th.InputBg;
+            btnCancel.ForeColor = th.Text;
+            btnCancel.BorderColor = th.Border;
             btnCancel.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
             Controls.Add(btnCancel);
             y += 38;
@@ -214,8 +252,13 @@ namespace DsChat
         private NumericUpDown AddNumber(string label, int x, int y, int w, decimal min, decimal max, decimal val, decimal step)
         {
             AddLabel(label, x, y);
+            return AddNumberBox(x, y + 22, w, min, max, val, step);
+        }
+
+        private NumericUpDown AddNumberBox(int x, int y, int w, decimal min, decimal max, decimal val, decimal step)
+        {
             NumericUpDown n = new NumericUpDown();
-            n.Location = new Point(x, y + 22);
+            n.Location = new Point(x, y);
             n.Size = new Size(w, 26);
             n.Minimum = min;
             n.Maximum = max;
@@ -243,6 +286,10 @@ namespace DsChat
             nTimeout.Value = Math.Min(600, Math.Max(10, cfg.TimeoutSeconds));
             nTemp.Value = (decimal)Math.Min(2, Math.Max(0, cfg.Temperature));
             nMaxTokens.Value = Math.Min(32000, Math.Max(0, cfg.MaxTokens));
+            nContext.Value = Math.Min(64000, Math.Max(0, cfg.ContextTokens));
+            cConcise.Checked = cfg.Concise;
+            cbTheme.SelectedIndex = cfg.ThemeMode < Theme.ModeSystem || cfg.ThemeMode > Theme.ModeDark
+                ? Theme.ModeSystem : cfg.ThemeMode;
         }
 
         private Config Collect()
@@ -262,6 +309,10 @@ namespace DsChat
             c.TimeoutSeconds = (int)nTimeout.Value;
             c.Temperature = (double)nTemp.Value;
             c.MaxTokens = (int)nMaxTokens.Value;
+            c.ContextTokens = (int)nContext.Value;
+            c.Concise = cConcise.Checked;
+            c.ThemeMode = cbTheme.SelectedIndex < 0 ? Theme.ModeSystem : cbTheme.SelectedIndex;
+            c.Dark = Theme.ResolveDark(c.ThemeMode);
             return c;
         }
 
@@ -270,7 +321,7 @@ namespace DsChat
             Config c = Collect();
             if (c.BaseUrl.Length == 0)
             {
-                MessageBox.Show(this, "请填写接口地址，例如 https://api.deepseek.com", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, "请填写接口地址，例如 https://api.openai.com", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 tBase.Focus();
                 return;
             }
@@ -357,6 +408,16 @@ namespace DsChat
             return s;
         }
 
+        private void ComboTheme_DrawItem(object sender, DrawItemEventArgs e)
+        {
+            if (e.Index < 0) return;
+            bool sel = (e.State & DrawItemState.Selected) != 0;
+            using (SolidBrush b = new SolidBrush(sel ? th.SidebarActive : th.InputBg))
+                e.Graphics.FillRectangle(b, e.Bounds);
+            TextRenderer.DrawText(e.Graphics, Convert.ToString(cbTheme.Items[e.Index]), cbTheme.Font, e.Bounds,
+                th.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        }
+
         private void ApplyTheme()
         {
             BackColor = th.Bg;
@@ -366,6 +427,7 @@ namespace DsChat
                 if (c is Label)
                 {
                     Label l = (Label)c;
+                    l.BackColor = th.Bg;
                     if (l.Font.Bold && l.Font.Size > 13) l.ForeColor = th.Text;
                     else if (l == lblStatus) { }
                     else l.ForeColor = th.SubText;
@@ -380,23 +442,35 @@ namespace DsChat
                     c.BackColor = th.InputBg;
                     c.ForeColor = th.Text;
                 }
+                else if (c is ComboBox)
+                {
+                    c.BackColor = th.InputBg;
+                    c.ForeColor = th.Text;
+                }
                 else if (c is CheckBox)
                 {
                     c.ForeColor = th.Text;
                     c.BackColor = th.Bg;
                 }
-                else if (c is Button)
+                else if (c is RoundedButton)
                 {
-                    Button b = (Button)c;
-                    b.FlatAppearance.BorderColor = th.Border;
+                    RoundedButton b = (RoundedButton)c;
                     b.BackColor = th.InputBg;
                     b.ForeColor = th.Text;
+                    b.BorderColor = th.Border;
                 }
             }
             btnSave.BackColor = th.Accent;
-            btnSave.ForeColor = Color.White;
-            btnSave.FlatAppearance.BorderColor = th.Accent;
+            btnSave.ForeColor = th.AccentText;
+            btnSave.BorderColor = th.Accent;
             lblStatus.ForeColor = th.SubText;
+            if (IsHandleCreated) Ui.ApplyTitleBarTheme(this, th.IsDark);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            Ui.ApplyTitleBarTheme(this, th.IsDark);
         }
     }
 }

@@ -15,7 +15,7 @@ namespace DsChat
         private string lastReply;
 
         private TextBox tDir;
-        private Button btnBrowse, btnOpen, btnInsert, btnNew, btnRename, btnDelete, btnExport, btnRefresh, btnUp, btnClose;
+        private RoundedButton btnBrowse, btnOpen, btnInsert, btnNew, btnRename, btnDelete, btnExport, btnRefresh, btnUp, btnClose;
         private CheckBox cTools, cConfirm;
         private ListView list;
         private Label lblStatus;
@@ -65,7 +65,7 @@ namespace DsChat
             y += 44;
 
             Label sub = new Label();
-            sub.Text = "AI 只能在下面这个目录里读写文件，越界路径会被拒绝。";
+            sub.Text = "AI 只能在下面这个目录里读写文件；支持文本（.py/.c 等）和 .xlsx/.docx。";
             sub.AutoSize = true;
             sub.ForeColor = th.SubText;
             sub.Location = new Point(x, y);
@@ -74,19 +74,22 @@ namespace DsChat
 
             Label ldir = new Label();
             ldir.Text = "目录";
-            ldir.AutoSize = true;
-            ldir.Location = new Point(x, y + 4);
+            ldir.AutoSize = false;
+            ldir.Size = new Size(40, 30);
+            ldir.TextAlign = ContentAlignment.MiddleLeft;
+            ldir.Location = new Point(x, y);
             Controls.Add(ldir);
 
             tDir = new TextBox();
+            tDir.AutoSize = false;
             tDir.Location = new Point(x + 44, y);
-            tDir.Size = new Size(w - 44 - 92, 26);
+            tDir.Size = new Size(w - 44 - 92, 30);
             tDir.BorderStyle = BorderStyle.FixedSingle;
             Controls.Add(tDir);
 
             btnBrowse = MakeButton("选择…", x + w - 84, y, 84);
             btnBrowse.Click += delegate { BrowseDir(); };
-            y += 36;
+            y += 38;
 
             cTools = new CheckBox();
             cTools.Text = "允许 AI 读写工作区文件（函数调用）";
@@ -134,7 +137,7 @@ namespace DsChat
             btnUp = MakeButton("上级", bx, y, 80);
             btnUp.Click += delegate { GoUp(); };
 
-            btnClose = MakeButton("关闭", ClientSize.Width - x - 80, y, 80);
+            btnClose = MakeButton("保存", ClientSize.Width - x - 80, y, 80);
             btnClose.Click += delegate { CloseAndSave(); };
             y += 40;
 
@@ -146,15 +149,13 @@ namespace DsChat
             Controls.Add(lblStatus);
         }
 
-        private Button MakeButton(string text, int x, int y, int w)
+        private RoundedButton MakeButton(string text, int x, int y, int w)
         {
-            Button b = new Button();
+            RoundedButton b = new RoundedButton();
             b.Text = text;
             b.Location = new Point(x, y);
             b.Size = new Size(w, 30);
-            b.FlatStyle = FlatStyle.Flat;
-            b.FlatAppearance.BorderSize = 1;
-            b.FlatAppearance.BorderColor = th.Border;
+            b.BorderColor = th.Border;
             b.BackColor = th.InputBg;
             b.ForeColor = th.Text;
             Controls.Add(b);
@@ -289,7 +290,7 @@ namespace DsChat
         private void NewFile()
         {
             string initial = subdir.Length == 0 ? "新建文件.txt" : subdir.Replace('\\', '/') + "/新建文件.txt";
-            string name = Prompt.Ask(this, th, "新建文件", "相对工作区的路径，例如 notes/日记.txt", initial);
+            string name = Prompt.Ask(this, th, "新建文件", "相对路径，例如 src/main.c、script.py、表格.xlsx、文档.docx", initial);
             if (name == null) return;
             try
             {
@@ -336,13 +337,16 @@ namespace DsChat
         private void ExportReply()
         {
             if (lastReply.Trim().Length == 0) { SetStatus("当前没有可导出的回复", false); return; }
-            string name = Prompt.Ask(this, th, "导出最后一条回复", "保存到相对工作区的路径", "回复.txt");
+            string name = Prompt.Ask(this, th, "导出最后一条回复",
+                "保存为 .txt/.md/.py，或 .docx / .xlsx", "回复.txt");
             if (name == null) return;
             try
             {
                 int n = Workspace.WriteText(cfg.Workspace, name, lastReply);
                 RefreshList();
-                SetStatus("已保存 " + n + " 个字符到 " + name, true);
+                if (OfficeFiles.IsWorkbook(name)) SetStatus("已生成 Excel 表格：" + name, true);
+                else if (OfficeFiles.IsDocument(name)) SetStatus("已生成 Word 文档：" + name, true);
+                else SetStatus("已保存 " + n + " 个字符到 " + name, true);
             }
             catch (Exception ex) { SetStatus(ex.Message, false); }
         }
@@ -413,15 +417,21 @@ namespace DsChat
                     c.BackColor = th.InputBg;
                     c.ForeColor = th.Text;
                 }
-                else if (c is Button)
+                else if (c is RoundedButton)
                 {
-                    Button b = (Button)c;
-                    b.FlatAppearance.BorderColor = th.Border;
+                    RoundedButton b = (RoundedButton)c;
+                    b.BorderColor = th.Border;
                     b.BackColor = th.InputBg;
                     b.ForeColor = th.Text;
-                    b.UseVisualStyleBackColor = false;
                 }
             }
+            if (IsHandleCreated) Ui.ApplyTitleBarTheme(this, th.IsDark);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            Ui.ApplyTitleBarTheme(this, th.IsDark);
         }
     }
 
@@ -459,26 +469,24 @@ namespace DsChat
                 t.ForeColor = th.Text;
                 f.Controls.Add(t);
 
-                Button ok = new Button();
+                RoundedButton ok = new RoundedButton();
                 ok.Text = "确定";
                 ok.DialogResult = DialogResult.OK;
                 ok.Location = new Point(240, 96);
                 ok.Size = new Size(88, 30);
-                ok.FlatStyle = FlatStyle.Flat;
                 ok.BackColor = th.InputBg;
                 ok.ForeColor = th.Text;
-                ok.FlatAppearance.BorderColor = th.Border;
+                ok.BorderColor = th.Border;
                 f.Controls.Add(ok);
 
-                Button cancel = new Button();
+                RoundedButton cancel = new RoundedButton();
                 cancel.Text = "取消";
                 cancel.DialogResult = DialogResult.Cancel;
                 cancel.Location = new Point(344, 96);
                 cancel.Size = new Size(88, 30);
-                cancel.FlatStyle = FlatStyle.Flat;
                 cancel.BackColor = th.InputBg;
                 cancel.ForeColor = th.Text;
-                cancel.FlatAppearance.BorderColor = th.Border;
+                cancel.BorderColor = th.Border;
                 f.Controls.Add(cancel);
 
                 f.AcceptButton = ok;
@@ -500,10 +508,15 @@ namespace DsChat
     {
         public static ConfirmChoice AskWrite(IWin32Window owner, Theme th, string path, string content)
         {
-            string preview = content == null ? "" : content.Replace("\r\n", "\n").Replace("\r", "\n");
-            if (preview.Length > 3000) preview = preview.Substring(0, 3000) + "\r\n…（已截断）";
+            return AskWrite(owner, th, path, content, false);
+        }
+
+        public static ConfirmChoice AskWrite(IWin32Window owner, Theme th, string path, string detail, bool diffMode)
+        {
+            string preview = detail == null ? "" : detail.Replace("\r\n", "\n").Replace("\r", "\n");
+            if (preview.Length > 12000) preview = preview.Substring(0, 12000) + "\r\n…（已截断）";
             preview = preview.Replace("\n", "\r\n");
-            return Ask(owner, th, "确认写入", "AI 想写入文件：", path, preview, true);
+            return Ask(owner, th, "确认写入", diffMode ? "AI 想写入文件（行级差异）：" : "AI 想写入文件：", path, preview, true);
         }
 
         public static ConfirmChoice AskDelete(IWin32Window owner, Theme th, string path)
@@ -580,36 +593,33 @@ namespace DsChat
                 ConfirmChoice choice = ConfirmChoice.Deny;
                 int by = h - 52;
 
-                Button allow = new Button();
+                RoundedButton allow = new RoundedButton();
                 allow.Text = "允许";
                 allow.Size = new Size(100, 32);
                 allow.Location = new Point(w - 24 - 100, by);
-                allow.FlatStyle = FlatStyle.Flat;
                 allow.BackColor = th.Accent;
-                allow.ForeColor = Color.White;
-                allow.FlatAppearance.BorderColor = th.Accent;
+                allow.ForeColor = th.AccentText;
+                allow.BorderColor = th.Accent;
                 allow.Click += delegate { choice = ConfirmChoice.Allow; f.DialogResult = DialogResult.OK; f.Close(); };
                 f.Controls.Add(allow);
 
-                Button all = new Button();
+                RoundedButton all = new RoundedButton();
                 all.Text = "本轮全部允许";
                 all.Size = new Size(150, 32);
                 all.Location = new Point(allow.Left - 12 - 150, by);
-                all.FlatStyle = FlatStyle.Flat;
                 all.BackColor = th.InputBg;
                 all.ForeColor = th.Text;
-                all.FlatAppearance.BorderColor = th.Border;
+                all.BorderColor = th.Border;
                 all.Click += delegate { choice = ConfirmChoice.AllowTurn; f.DialogResult = DialogResult.OK; f.Close(); };
                 f.Controls.Add(all);
 
-                Button deny = new Button();
+                RoundedButton deny = new RoundedButton();
                 deny.Text = "拒绝";
                 deny.Size = new Size(90, 32);
                 deny.Location = new Point(all.Left - 12 - 90, by);
-                deny.FlatStyle = FlatStyle.Flat;
                 deny.BackColor = th.InputBg;
                 deny.ForeColor = th.Text;
-                deny.FlatAppearance.BorderColor = th.Border;
+                deny.BorderColor = th.Border;
                 deny.Click += delegate { choice = ConfirmChoice.Deny; f.DialogResult = DialogResult.Cancel; f.Close(); };
                 f.Controls.Add(deny);
 
