@@ -148,21 +148,6 @@ namespace DsChat
         [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
         private static extern int SetWindowTheme(IntPtr hwnd, string app, string idlist);
 
-        [DllImport("user32.dll")]
-        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
-
-        private const int WM_SETREDRAW = 0x000B;
-
-        private void SetRedraw(bool on)
-        {
-            try
-            {
-                if (IsHandleCreated)
-                    SendMessage(Handle, WM_SETREDRAW, on ? (IntPtr)1 : IntPtr.Zero, IntPtr.Zero);
-            }
-            catch { }
-        }
-
         private void ApplyScrollbarTheme()
         {
             try
@@ -394,7 +379,7 @@ namespace DsChat
             lblHint.Font = new Font("Microsoft YaHei UI", 8.5f);
             lblHint.AutoSize = true;
             lblHint.Location = new Point(30, 78);
-            composerWrap.Controls.Add(lblHint);
+            main.Controls.Add(lblHint);
 
             KeyDown += ChatForm_KeyDown;
             Resize += delegate { LayoutAll(); };
@@ -429,14 +414,17 @@ namespace DsChat
                 int boxW = Math.Max(Ui.Px(200), mw - Ui.Px(52));
                 int inputW = Math.Max(Ui.Px(80), boxW - btnSend.Width - Ui.Px(54));
                 composerBoxH = MeasureComposerHeight(inputW);
-                int composerH = composerBoxH + Ui.Px(40);
 
-                composerWrap.SetBounds(0, Math.Max(headerH, mh - composerH), mw, composerH);
+                // 提示行固定在窗口底部，不随输入框增高/降低而移动，避免闪烁
+                int wrapH = composerBoxH + Ui.Px(14);
+                int composerH = wrapH + Ui.Px(4) + lblHint.Height + Ui.Px(6);
+
+                composerWrap.SetBounds(0, Math.Max(headerH, mh - composerH), mw, wrapH);
                 msgHost.SetBounds(0, headerH, mw, Math.Max(0, mh - headerH - composerH));
 
                 composerBox.Top = Ui.Px(10);
                 composerBox.Height = composerBoxH;
-                lblHint.Top = composerBox.Bottom + Ui.Px(4);
+                lblHint.Top = composerWrap.Bottom + Ui.Px(4);
 
                 LayoutHeader();
                 LayoutComposer();
@@ -472,18 +460,9 @@ namespace DsChat
             int inputW = Math.Max(Ui.Px(80), boxW - btnSend.Width - Ui.Px(54));
             if (MeasureComposerHeight(inputW) == composerBoxH) return;
 
-            bool redraw = IsHandleCreated;
-            if (redraw) SetRedraw(false);
-            try { LayoutAll(); }
-            finally
-            {
-                if (redraw)
-                {
-                    SetRedraw(true);
-                    composerWrap.Invalidate(true);
-                    msgHost.Invalidate();
-                }
-            }
+            LayoutAll();
+            composerWrap.Invalidate(true);
+            msgHost.Invalidate(true);
         }
 
         private void LayoutHeader()
