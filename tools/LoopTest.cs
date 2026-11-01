@@ -60,26 +60,50 @@ internal static class LoopTest
 
         int rounds = (int)Field(f, "toolRounds");
         bool summarizing = (bool)Field(f, "summarizing");
-        IList sessions = (IList)Field(f, "sessions");
-        int active = (int)Field(f, "active");
-        object session = sessions[active];
-        IList msgs = (IList)session.GetType().GetField("Messages").GetValue(session);
-        string last = "";
-        for (int i = msgs.Count - 1; i >= 0; i--)
-        {
-            object m = msgs[i];
-            string role = (string)m.GetType().GetField("Role").GetValue(m);
-            string content = (string)m.GetType().GetField("Content").GetValue(m);
-            if (role == "assistant" && !string.IsNullOrEmpty(content)) { last = content; break; }
-        }
+        string last = LastAssistant(f);
 
         Console.WriteLine("rounds=" + rounds + " summarizing=" + summarizing + " last=[" + last + "]");
         int max = (int)typeof(ChatForm).GetField("MaxToolRounds", BindingFlags.NonPublic | BindingFlags.Static).GetRawConstantValue();
         if (rounds != max) throw new Exception("expected " + max + " tool rounds, got " + rounds);
         if (last.IndexOf("总结") < 0) throw new Exception("no final summary text");
+
+        // 重复写入同一文件：第 3 轮应自动停止并生成总结
+        input.Text = "writeloop";
+        typeof(ChatForm).GetMethod("OnSendClicked", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(f, null);
+        end = DateTime.Now.AddSeconds(30);
+        while (DateTime.Now < end)
+        {
+            Pump(100);
+            if (!(bool)Field(f, "streaming")) break;
+        }
+        rounds = (int)Field(f, "toolRounds");
+        summarizing = (bool)Field(f, "summarizing");
+        last = LastAssistant(f);
+        Console.WriteLine("writeloop rounds=" + rounds + " summarizing=" + summarizing + " last=[" + last + "]");
+        if (rounds != 3) throw new Exception("expected 3 write rounds, got " + rounds);
+        if (last.IndexOf("总结") < 0) throw new Exception("no write-loop summary");
+        string fpath = Path.Combine(ws, "loop.txt");
+        if (!File.Exists(fpath) || File.ReadAllText(fpath) != "same content") throw new Exception("loop file wrong");
+
         Console.WriteLine("LOOP OK");
         f.Hide();
         Environment.Exit(0);
+    }
+
+    private static string LastAssistant(ChatForm f)
+    {
+        IList sessions = (IList)Field(f, "sessions");
+        int active = (int)Field(f, "active");
+        object session = sessions[active];
+        IList msgs = (IList)session.GetType().GetField("Messages").GetValue(session);
+        for (int i = msgs.Count - 1; i >= 0; i--)
+        {
+            object m = msgs[i];
+            string role = (string)m.GetType().GetField("Role").GetValue(m);
+            string content = (string)m.GetType().GetField("Content").GetValue(m);
+            if (role == "assistant" && !string.IsNullOrEmpty(content)) return content;
+        }
+        return "";
     }
 
     private static object Field(object o, string name)

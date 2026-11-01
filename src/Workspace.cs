@@ -150,6 +150,33 @@ namespace DsChat
             return text.Length;
         }
 
+        /// <summary>文件是否已经与要写入的内容完全一致（用于跳过重复写入）。</summary>
+        public static bool SameText(string root, string rel, string content)
+        {
+            try
+            {
+                string full = Resolve(root, rel);
+                if (!File.Exists(full)) return false;
+                byte[] want = new UTF8Encoding(false).GetBytes(content == null ? "" : content);
+                byte[] have = File.ReadAllBytes(full);
+                if (have.Length != want.Length) return false;
+                for (int i = 0; i < have.Length; i++)
+                    if (have[i] != want[i]) return false;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        public static bool Exists(string root, string rel)
+        {
+            try
+            {
+                string full = Resolve(root, rel);
+                return File.Exists(full) || Directory.Exists(full);
+            }
+            catch { return false; }
+        }
+
         public static void Delete(string root, string rel)
         {
             string full = Resolve(root, rel);

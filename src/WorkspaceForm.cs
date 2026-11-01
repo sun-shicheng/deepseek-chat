@@ -492,4 +492,134 @@ namespace DsChat
             }
         }
     }
+
+    public enum ConfirmChoice { Deny, Allow, AllowTurn }
+
+    /// <summary>AI 写入/删除前的确认框：允许一次、本轮全部允许、拒绝。</summary>
+    internal static class Confirm
+    {
+        public static ConfirmChoice AskWrite(IWin32Window owner, Theme th, string path, string content)
+        {
+            string preview = content == null ? "" : content.Replace("\r\n", "\n").Replace("\r", "\n");
+            if (preview.Length > 3000) preview = preview.Substring(0, 3000) + "\r\n…（已截断）";
+            preview = preview.Replace("\n", "\r\n");
+            return Ask(owner, th, "确认写入", "AI 想写入文件：", path, preview, true);
+        }
+
+        public static ConfirmChoice AskDelete(IWin32Window owner, Theme th, string path)
+        {
+            return Ask(owner, th, "确认删除", "AI 想删除：", path, "这个操作不可撤销。", false);
+        }
+
+        private static ConfirmChoice Ask(IWin32Window owner, Theme th, string title, string lead, string path, string detail, bool showPreview)
+        {
+            using (Form f = new Form())
+            {
+                f.Text = title;
+                f.FormBorderStyle = FormBorderStyle.FixedDialog;
+                f.MaximizeBox = false;
+                f.MinimizeBox = false;
+                f.StartPosition = FormStartPosition.CenterParent;
+                int w = showPreview ? 620 : 520;
+                int h = showPreview ? 420 : 220;
+                f.ClientSize = new Size(w, h);
+                f.BackColor = th.Bg;
+                f.ForeColor = th.Text;
+                f.Font = new Font("Microsoft YaHei UI", 9.75f);
+
+                Label heading = new Label();
+                heading.Text = title;
+                heading.Font = new Font("Microsoft YaHei UI", 13f, FontStyle.Bold);
+                heading.AutoSize = true;
+                heading.Location = new Point(24, 16);
+                heading.ForeColor = th.Text;
+                f.Controls.Add(heading);
+
+                Label ll = new Label();
+                ll.Text = lead;
+                ll.AutoSize = true;
+                ll.Location = new Point(24, 54);
+                ll.ForeColor = th.SubText;
+                f.Controls.Add(ll);
+
+                Label lp = new Label();
+                lp.Text = path;
+                lp.AutoSize = false;
+                lp.Size = new Size(w - 48, 24);
+                lp.Location = new Point(24, 76);
+                lp.ForeColor = th.Text;
+                lp.Font = new Font("Microsoft YaHei UI", 9.75f, FontStyle.Bold);
+                f.Controls.Add(lp);
+
+                if (showPreview)
+                {
+                    TextBox tb = new TextBox();
+                    tb.Multiline = true;
+                    tb.ReadOnly = true;
+                    tb.TabStop = false;
+                    tb.ScrollBars = ScrollBars.Vertical;
+                    tb.BorderStyle = BorderStyle.FixedSingle;
+                    tb.Font = new Font("Consolas", 9f);
+                    tb.BackColor = th.InputBg;
+                    tb.ForeColor = th.CodeText;
+                    tb.SetBounds(24, 108, w - 48, h - 108 - 76);
+                    tb.Text = detail;
+                    f.Controls.Add(tb);
+                }
+                else
+                {
+                    Label warn = new Label();
+                    warn.Text = detail;
+                    warn.AutoSize = false;
+                    warn.Size = new Size(w - 48, 40);
+                    warn.Location = new Point(24, 112);
+                    warn.ForeColor = th.Danger;
+                    f.Controls.Add(warn);
+                }
+
+                ConfirmChoice choice = ConfirmChoice.Deny;
+                int by = h - 52;
+
+                Button allow = new Button();
+                allow.Text = "允许";
+                allow.Size = new Size(100, 32);
+                allow.Location = new Point(w - 24 - 100, by);
+                allow.FlatStyle = FlatStyle.Flat;
+                allow.BackColor = th.Accent;
+                allow.ForeColor = Color.White;
+                allow.FlatAppearance.BorderColor = th.Accent;
+                allow.Click += delegate { choice = ConfirmChoice.Allow; f.DialogResult = DialogResult.OK; f.Close(); };
+                f.Controls.Add(allow);
+
+                Button all = new Button();
+                all.Text = "本轮全部允许";
+                all.Size = new Size(150, 32);
+                all.Location = new Point(allow.Left - 12 - 150, by);
+                all.FlatStyle = FlatStyle.Flat;
+                all.BackColor = th.InputBg;
+                all.ForeColor = th.Text;
+                all.FlatAppearance.BorderColor = th.Border;
+                all.Click += delegate { choice = ConfirmChoice.AllowTurn; f.DialogResult = DialogResult.OK; f.Close(); };
+                f.Controls.Add(all);
+
+                Button deny = new Button();
+                deny.Text = "拒绝";
+                deny.Size = new Size(90, 32);
+                deny.Location = new Point(all.Left - 12 - 90, by);
+                deny.FlatStyle = FlatStyle.Flat;
+                deny.BackColor = th.InputBg;
+                deny.ForeColor = th.Text;
+                deny.FlatAppearance.BorderColor = th.Border;
+                deny.Click += delegate { choice = ConfirmChoice.Deny; f.DialogResult = DialogResult.Cancel; f.Close(); };
+                f.Controls.Add(deny);
+
+                f.AcceptButton = allow;
+                f.CancelButton = deny;
+                if (Math.Abs(Ui.S - 1f) > 0.01f) f.Scale(new SizeF(Ui.S, Ui.S));
+                f.ActiveControl = allow;
+                f.ShowDialog(owner);
+                return choice;
+            }
+        }
+    }
 }

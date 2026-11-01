@@ -144,6 +144,10 @@ namespace DsChat
         private const int MaxToolRounds = 12;
         private bool toolsAllowed = true;
         private bool summarizing;
+        private bool autoApproveThisTurn;
+        private HashSet<string> approvedWritePaths = new HashSet<string>();
+        private string lastWriteSig;
+        private int sameWriteRepeats;
 
         private const int SidebarWidth = 252;
 
@@ -823,6 +827,10 @@ namespace DsChat
             turnExtra.Clear();
             toolRounds = 0;
             summarizing = false;
+            autoApproveThisTurn = false;
+            approvedWritePaths.Clear();
+            lastWriteSig = null;
+            sameWriteRepeats = 0;
             userStopped = false;
             StartRequest(true);
         }
@@ -900,7 +908,7 @@ namespace DsChat
                         revealed = PendingLength();
                         FlushStream();
                         if (toolRounds < MaxToolRounds) RunTools(cli);
-                        else StartFinalSummary();
+                        else StartFinalSummary("工具调用次数已经达到 " + MaxToolRounds + " 轮上限");
                         return;
                     }
                     if (revealed >= PendingLength()) FinishTurn();
@@ -972,8 +980,26 @@ namespace DsChat
         {
             toolRounds++;
             SetStatus("● 工具调用 " + toolRounds + "/" + MaxToolRounds + "…", false);
-            string partial = PendingText();
             List<ToolCall> calls = cli.ToolCalls;
+
+            if (IsWriteOnly(calls))
+            {
+                string sig = WriteSignature(calls);
+                if (sig == lastWriteSig) sameWriteRepeats++;
+                else { lastWriteSig = sig; sameWriteRepeats = 1; }
+                if (sameWriteRepeats >= 3)
+                {
+                    StartFinalSummary("检测到连续重复写入相同内容，已经停止重复操作");
+                    return;
+                }
+            }
+            else
+            {
+                lastWriteSig = null;
+                sameWriteRepeats = 0;
+            }
+
+            string partial = PendingText();
 
             if (partial.Trim().Length == 0) RemoveStreamingView();
             ClearPending();
@@ -1003,7 +1029,7 @@ namespace DsChat
         }
 
         /// <summary>达到工具轮数上限后，关闭工具再请求一次文字总结，避免直接空手结束。</summary>
-        private void StartFinalSummary()
+        private void StartFinalSummary(string reason)
         {
             if (summarizing) { FinishTurn(); return; }
             summarizing = true;
@@ -1017,10 +1043,29 @@ namespace DsChat
                 turnExtra.Add(new ChatMsg("assistant", partial));
 
             turnExtra.Add(new ChatMsg("user",
-                "工具调用次数已经达到 " + MaxToolRounds + " 轮上限。请停止调用工具，直接根据上面已经完成的工具结果，用中文总结：已经完成了什么、写入或修改了哪些文件、还有哪些没有完成。不要再请求调用工具。"));
+                reason + "。请停止调用工具，直接根据上面已经完成的工具结果，用中文总结：已经完成了什么、写入或修改了哪些文件、还有哪些没有完成。不要再请求调用工具。"));
 
             StartRequest(false);
-            SetStatus("● 工具调用已达上限，正在生成总结…", false);
+            SetStatus("● 工具调用已停止，正在生成总结…", false);
+        }
+
+        private static bool IsWriteOnly(List<ToolCall> calls)
+        {
+            if (calls == null || calls.Count == 0) return false;
+            foreach (ToolCall tc in calls)
+            {
+                string n = tc.Name == null ? "" : tc.Name.Trim();
+                if (n != "write_file" && n != "delete_file") return false;
+            }
+            return true;
+        }
+
+        private static string WriteSignature(List<ToolCall> calls)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (ToolCall tc in calls)
+                sb.Append(tc.Name).Append('\u0001').Append(tc.Arguments).Append('\u0002');
+            return sb.ToString();
         }
 
         private string ExecuteTool(ToolCall tc, out string summary)
@@ -1047,6 +1092,11 @@ namespace DsChat
                 {
                     string rel = ArgOf(tc.Arguments, "path");
                     string content = ArgOf(tc.Arguments, "content");
+                    if (Workspace.SameText(cfg.Workspace, rel, content))
+                    {
+                        summary = "🔧 内容未变化，跳过写入 " + rel;
+                        return "文件内容与请求完全相同，无需重复写入：" + rel;
+                    }
                     if (cfg.ConfirmWrites && !ConfirmWrite(rel, content)) return "用户拒绝了这次写入，请不要重复尝试。";
                     int n = Workspace.WriteText(cfg.Workspace, rel, content);
                     summary = "🔧 写入 " + rel + "（" + n + " 字符）";
@@ -1055,6 +1105,8 @@ namespace DsChat
                 if (name == "delete_file")
                 {
                     string rel = ArgOf(tc.Arguments, "path");
+                    string full = Workspace.Resolve(cfg.Workspace, rel);
+                    if (!File.Exists(full) && !Directory.Exists(full)) return "文件或目录本来就不存在，无需删除：" + rel;
                     if (cfg.ConfirmWrites && !ConfirmDelete(rel)) return "用户拒绝了这次删除，请不要重复尝试。";
                     Workspace.Delete(cfg.Workspace, rel);
                     summary = "🔧 删除 " + rel;
@@ -1071,16 +1123,28 @@ namespace DsChat
 
         private bool ConfirmWrite(string rel, string content)
         {
-            string preview = content == null ? "" : content.Replace("\r", "");
-            if (preview.Length > 400) preview = preview.Substring(0, 400) + "\n…";
-            string msg = "AI 想写入文件：\n" + rel + "\n\n预览：\n" + preview + "\n\n允许写入吗？";
-            return MessageBox.Show(this, msg, "确认写入", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
+            if (autoApproveThisTurn) return true;
+            string key = WriteKey(rel);
+            if (approvedWritePaths.Contains(key)) return true;
+
+            ConfirmChoice c = Confirm.AskWrite(this, th, rel, content);
+            if (c == ConfirmChoice.AllowTurn) autoApproveThisTurn = true;
+            else if (c == ConfirmChoice.Allow) approvedWritePaths.Add(key);
+            return c != ConfirmChoice.Deny;
+        }
+
+        private string WriteKey(string rel)
+        {
+            try { return Workspace.Resolve(cfg.Workspace, rel).ToLowerInvariant(); }
+            catch { return (rel == null ? "" : rel.Trim()).ToLowerInvariant(); }
         }
 
         private bool ConfirmDelete(string rel)
         {
-            string msg = "AI 想删除：" + rel + "\n\n这个操作不可撤销，允许吗？";
-            return MessageBox.Show(this, msg, "确认删除", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
+            if (autoApproveThisTurn) return true;
+            ConfirmChoice c = Confirm.AskDelete(this, th, rel);
+            if (c == ConfirmChoice.AllowTurn) autoApproveThisTurn = true;
+            return c != ConfirmChoice.Deny;
         }
 
         /// <summary>从工具调用的 JSON 参数里取字符串字段。</summary>

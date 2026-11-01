@@ -57,6 +57,24 @@ internal static class MockServer
                 {
                     Write(ns, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n");
 
+                    // 重复写入测试：模型每轮都要求写入同一个文件
+                    if (body.Contains("writeloop"))
+                    {
+                        if (body.Contains("\"tools\":["))
+                        {
+                            EmitToolCall(ns, "write_file", "{\"path\":\"loop.txt\",\"content\":\"same content\"}");
+                        }
+                        else
+                        {
+                            string done = "重复写入已停止，这是最后的文字总结。";
+                            foreach (string piece in Split(done, 4))
+                                Write(ns, "data: {\"choices\":[{\"delta\":{\"content\":\"" + Escape(piece) + "\"}}]}\n\n");
+                        }
+                        Write(ns, "data: [DONE]\n\n");
+                        ns.Flush();
+                        return;
+                    }
+
                     // 工具轮数上限测试：只要请求里还有 tools 就一直要求调用工具
                     if (body.Contains("loopforever"))
                     {
