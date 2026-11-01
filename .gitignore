@@ -1,0 +1,14 @@
+# 编译产物
+*.exe
+*.pdb
+*.obj
+*.log
+
+# 测试辅助程序的产物
+tools/*.exe
+tools/*.log
+tools/*.json
+
+# 系统文件
+Thumbs.db
+desktop.ini
