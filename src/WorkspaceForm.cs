@@ -483,7 +483,8 @@ namespace DsChat
 
                 f.AcceptButton = ok;
                 f.CancelButton = cancel;
-                f.Select();
+                if (Math.Abs(Ui.S - 1f) > 0.01f) f.Scale(new SizeF(Ui.S, Ui.S));
+                f.ActiveControl = t;
                 t.SelectAll();
                 if (f.ShowDialog(owner) != DialogResult.OK) return null;
                 string v = t.Text.Trim();
